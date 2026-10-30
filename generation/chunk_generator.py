@@ -42,19 +42,19 @@ class IncrementalChunkGenerator:
 
             # Active instruments in this section
             current_bar = i * chunk_duration_bars
-            active_insts = ["piano"]
+            active_insts = ["Original Mug Beat"]
             if current_bar >= 1:
-                active_insts.append("bass")
+                active_insts.append("Tuned Mug Melody")
             if current_bar >= 2:
-                active_insts.append("drums")
+                active_insts.append("Mug Sub-Bass")
             if current_bar >= 3:
-                active_insts.append("guitar")
+                active_insts.append("Mug Drums (Kick/Snare/Hi-Hat)")
 
             # Compute spectrogram of this specific chunk
             chunk_spec = compute_stft_spectrogram(chunk_audio, sr=self.sample_rate)
             chunk_grid = spectrogram_to_grid(chunk_spec, max_freq_bins=64, max_time_steps=80)
 
-            # Also compute cumulative growing spectrogram
+            # Cumulative growing spectrogram
             full_spec = compute_stft_spectrogram(cumulative_audio, sr=self.sample_rate)
             full_grid = spectrogram_to_grid(full_spec, max_freq_bins=64, max_time_steps=180)
 

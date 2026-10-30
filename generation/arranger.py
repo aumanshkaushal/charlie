@@ -1,25 +1,20 @@
-"""Multi-instrument progressive arrangement engine for Charlie."""
+"""Multi-instrument progressive arrangement engine for Charlie.
+Uses the EnvironmentalSoundSampler to ensure every instrument in the composition
+(drums, bass, melody, keys) is physically rendered from the user's input sound.
+"""
 import numpy as np
 import pretty_midi
 from audio.features import NOTE_NAMES
 from audio.beat_detection import get_musical_grid
-from audio.midi_generator import (
-    create_empty_midi,
-    add_notes_to_track,
-    get_scale_pitches,
-    DRUM_KICK,
-    DRUM_SNARE,
-    DRUM_HIHAT_CLOSED,
-    DRUM_HIHAT_OPEN,
-)
-from audio.synthesizer import render_midi
+from audio.sampler import EnvironmentalSoundSampler
 from audio.mixer import mix_tracks
+from audio.midi_generator import get_scale_pitches
 
 
 class ArrangementEngine:
     """
     Arranges progressive multi-instrument musical compositions
-    conditioned on environmental audio features and Charlie adapter predictions.
+    where all instruments are sampled directly from the user's input sound.
     """
     def __init__(self, sample_rate: int = 22050):
         self.sample_rate = sample_rate
@@ -33,181 +28,152 @@ class ArrangementEngine:
         selected_instruments: list[str] = None,
     ) -> dict:
         """
-        Creates a complete multi-bar composition with progressive instrument entrances.
+        Creates a complete multi-bar composition sampled directly from the input audio.
         """
         if selected_instruments is None:
-            selected_instruments = ["piano", "bass", "drums", "guitar"]
+            selected_instruments = ["melody", "bass", "drums", "original"]
         selected_instruments = [inst.lower() for inst in selected_instruments]
 
         bpm = predictions.get("detected_bpm", 120.0)
-        key = predictions.get("predicted_key", "C")
+        key = predictions.get("predicted_key", "D")
         scale_type = predictions.get("predicted_scale", "minor")
         rhythm_grid = predictions.get("rhythm_grid_4x16", [[0] * 16 for _ in range(4)])
-        instrument_activations = predictions.get("instrument_activations", [[1, 1, 1, 1]] * 4)
-        velocity_curve = predictions.get("velocity_curve", [0.7, 0.8, 0.85, 0.9])
+        velocity_curve = predictions.get("velocity_curve", [0.6, 0.75, 0.85, 0.9])
 
-        # Mood adjustments
-        scale = "major" if mood.lower() == "energetic" else scale_type
-        base_octave_piano = 4 if mood.lower() != "cinematic" else 3
+        # Initialize the sound-to-instrument sampler on user's audio
+        sampler = EnvironmentalSoundSampler(original_waveform, sr=self.sample_rate)
 
         grid_info = get_musical_grid(bpm=bpm, duration=target_duration)
         seconds_per_bar = grid_info["seconds_per_bar"]
         seconds_per_step = grid_info["seconds_per_step"]
         total_bars = max(grid_info["total_bars"], 4)
 
-        # Scale pitches
-        piano_pitches = get_scale_pitches(key, scale, base_octave=base_octave_piano)
+        scale = "major" if mood.lower() == "energetic" else scale_type
+        # Musical scale notes in key
+        melody_pitches = get_scale_pitches(key, scale, base_octave=4)
         bass_pitches = get_scale_pitches(key, scale, base_octave=2)
-        guitar_pitches = get_scale_pitches(key, scale, base_octave=3)
 
-        pm = create_empty_midi(bpm=bpm)
+        total_samples = int(target_duration * self.sample_rate)
 
-        # Note accumulators
-        notes_piano = []
-        notes_bass = []
-        notes_drums = []
-        notes_guitar = []
+        # Separate track audio buffers
+        track_melody = np.zeros(total_samples, dtype=np.float32)
+        track_bass = np.zeros(total_samples, dtype=np.float32)
+        track_drums = np.zeros(total_samples, dtype=np.float32)
+        track_orig = np.zeros(total_samples, dtype=np.float32)
 
-        # Generate bar by bar
+        # 1. Loop and position original audio across the bars
+        orig_len = len(original_waveform)
+        if orig_len > 0:
+            for bar in range(total_bars):
+                start_sample = int(bar * seconds_per_bar * self.sample_rate)
+                end_sample = min(start_sample + orig_len, total_samples)
+                slice_len = end_sample - start_sample
+                if slice_len > 0:
+                    track_orig[start_sample:end_sample] += original_waveform[:slice_len]
+
+        # 2. Render Bar by Bar using the sampler
         for bar in range(total_bars):
-            bar_start = bar * seconds_per_bar
-            bar_idx_pattern = bar % 4  # loop 4-bar neural pattern
-            r_pattern = rhythm_grid[bar_idx_pattern] if bar_idx_pattern < len(rhythm_grid) else [0]*16
+            bar_start_sec = bar * seconds_per_bar
+            bar_idx_pattern = bar % 4
+            r_pattern = rhythm_grid[bar_idx_pattern] if bar_idx_pattern < len(rhythm_grid) else [0] * 16
             v_mult = velocity_curve[bar_idx_pattern] if bar_idx_pattern < len(velocity_curve) else 0.8
 
-            # Progressive activation gate:
-            # Bar 0: Piano enters
-            # Bar 1: Bass enters
-            # Bar 2: Drums enter
-            # Bar 3+: Guitar enters
-            allow_piano = "piano" in selected_instruments and bar >= 0
-            allow_bass = "bass" in selected_instruments and bar >= 1
-            allow_drums = "drums" in selected_instruments and bar >= 2
-            allow_guitar = "guitar" in selected_instruments and bar >= 3
+            # Progressive entrance:
+            # Bar 0: Original mug beat solo / anchor
+            # Bar 1: Mug Melody enters (pitched mug notes)
+            # Bar 2: Mug Bass enters (deep pitched mug thumps)
+            # Bar 3+: Full Mug Drums (Mug Kick, Snare, Hi-Hat) + Melody + Bass
+            allow_melody = bar >= 1
+            allow_bass = bar >= 2
+            allow_drums = bar >= 3
 
-            # --- 1. PIANO: melodic/chordal motifs anchored on detected rhythm ---
-            if allow_piano:
-                chord_root_idx = (bar % 4) * 2  # chord progression (I - vi - IV - V style)
+            # --- A. MELODY: Tuned Mug Notes (pitched ceramic resonance) ---
+            if allow_melody:
+                chord_root_idx = (bar % 4) * 2
                 for step in range(16):
-                    step_time = bar_start + step * seconds_per_step
-                    # Play note if onset predicted or on downbeats
-                    if r_pattern[step] == 1 or step in (0, 6, 10):
-                        pitch_idx = (chord_root_idx + (step % 3) * 2) % len(piano_pitches)
-                        pitch = piano_pitches[pitch_idx]
-                        duration = seconds_per_step * (2 if step in (0, 8) else 1.5)
-                        notes_piano.append({
-                            "pitch": pitch,
-                            "start": step_time,
-                            "end": step_time + duration,
-                            "velocity": int(80 * v_mult),
-                        })
-                        # Add a soft harmony third
-                        if step in (0, 8):
-                            harm_pitch = piano_pitches[(pitch_idx + 2) % len(piano_pitches)]
-                            notes_piano.append({
-                                "pitch": harm_pitch,
-                                "start": step_time,
-                                "end": step_time + duration * 1.5,
-                                "velocity": int(65 * v_mult),
-                            })
+                    step_sec = bar_start_sec + step * seconds_per_step
+                    start_idx = int(step_sec * self.sample_rate)
+                    if start_idx >= total_samples:
+                        continue
 
-            # --- 2. BASS: solid foundation on root notes ---
+                    # Play tuned note when rhythm onset occurs or on syncopated pulses
+                    if r_pattern[step] == 1 or step in (2, 6, 10, 14):
+                        pitch_idx = (chord_root_idx + (step % 4)) % len(melody_pitches)
+                        target_pitch = melody_pitches[pitch_idx]
+                        note_audio = sampler.render_tuned_note(
+                            pitch=target_pitch,
+                            base_pitch=60,
+                            duration=seconds_per_step * 2.0,
+                        ) * (v_mult * 0.75)
+
+                        end_idx = min(start_idx + len(note_audio), total_samples)
+                        track_melody[start_idx:end_idx] += note_audio[: end_idx - start_idx]
+
+            # --- B. BASS: Low Sub-Pitched Mug Hits ---
             if allow_bass:
                 root_pitch = bass_pitches[(bar % 4) * 2 % len(bass_pitches)]
                 fifth_pitch = bass_pitches[((bar % 4) * 2 + 4) % len(bass_pitches)]
 
-                # Downbeat root
-                notes_bass.append({
-                    "pitch": root_pitch,
-                    "start": bar_start,
-                    "end": bar_start + seconds_per_step * 3,
-                    "velocity": int(95 * v_mult),
-                })
-                # Offbeat fifth or octave
-                notes_bass.append({
-                    "pitch": fifth_pitch,
-                    "start": bar_start + seconds_per_step * 8,
-                    "end": bar_start + seconds_per_step * 11,
-                    "velocity": int(85 * v_mult),
-                })
-                # Pickup note before next bar
-                notes_bass.append({
-                    "pitch": root_pitch,
-                    "start": bar_start + seconds_per_step * 14,
-                    "end": bar_start + seconds_per_step * 15.5,
-                    "velocity": int(80 * v_mult),
-                })
+                # Downbeat bass hit
+                for bass_step, b_pitch in [(0, root_pitch), (8, fifth_pitch), (12, root_pitch)]:
+                    step_sec = bar_start_sec + bass_step * seconds_per_step
+                    start_idx = int(step_sec * self.sample_rate)
+                    if start_idx >= total_samples:
+                        continue
 
-            # --- 3. DRUMS: groove matching the 16th-step predicted rhythm ---
+                    bass_audio = sampler.render_bass_hit(
+                        pitch=b_pitch,
+                        base_pitch=60,
+                        duration=seconds_per_step * 3.0,
+                    ) * (v_mult * 0.9)
+
+                    end_idx = min(start_idx + len(bass_audio), total_samples)
+                    track_bass[start_idx:end_idx] += bass_audio[: end_idx - start_idx]
+
+            # --- C. DRUMS: Resynthesized Mug Kick, Snare & Hi-Hat ---
             if allow_drums:
                 for step in range(16):
-                    step_time = bar_start + step * seconds_per_step
+                    step_sec = bar_start_sec + step * seconds_per_step
+                    start_idx = int(step_sec * self.sample_rate)
+                    if start_idx >= total_samples:
+                        continue
 
-                    # Hi-Hat on steady 8ths or 16ths
+                    # Hi-Hat on steady 8ths
                     if step % 2 == 0 or r_pattern[step] == 1:
-                        notes_drums.append({
-                            "pitch": DRUM_HIHAT_CLOSED,
-                            "start": step_time,
-                            "end": step_time + 0.05,
-                            "velocity": int(60 * v_mult),
-                        })
+                        hihat = sampler.render_hihat(duration=0.08) * (v_mult * 0.6)
+                        end_idx = min(start_idx + len(hihat), total_samples)
+                        track_drums[start_idx:end_idx] += hihat[: end_idx - start_idx]
 
-                    # Kick on step 0 and on strong predicted onsets
-                    if step in (0, 8) or (r_pattern[step] == 1 and step in (4, 10, 12)):
-                        notes_drums.append({
-                            "pitch": DRUM_KICK,
-                            "start": step_time,
-                            "end": step_time + 0.1,
-                            "velocity": int(105 * v_mult),
-                        })
+                    # Kick on step 0, 8, and syncopated hits
+                    if step in (0, 8) or (r_pattern[step] == 1 and step in (10,)):
+                        kick = sampler.render_kick(duration=0.3) * (v_mult * 1.0)
+                        end_idx = min(start_idx + len(kick), total_samples)
+                        track_drums[start_idx:end_idx] += kick[: end_idx - start_idx]
 
                     # Snare on 4 and 12 (backbeat)
                     if step in (4, 12):
-                        notes_drums.append({
-                            "pitch": DRUM_SNARE,
-                            "start": step_time,
-                            "end": step_time + 0.1,
-                            "velocity": int(90 * v_mult),
-                        })
+                        snare = sampler.render_snare(duration=0.25) * (v_mult * 0.85)
+                        end_idx = min(start_idx + len(snare), total_samples)
+                        track_drums[start_idx:end_idx] += snare[: end_idx - start_idx]
 
-            # --- 4. GUITAR: acoustic strumming / arpeggios ---
-            if allow_guitar:
-                for step in (2, 6, 10, 14):
-                    step_time = bar_start + step * seconds_per_step
-                    g_pitch = guitar_pitches[(step + bar) % len(guitar_pitches)]
-                    notes_guitar.append({
-                        "pitch": g_pitch,
-                        "start": step_time,
-                        "end": step_time + seconds_per_step * 2,
-                        "velocity": int(70 * v_mult),
-                    })
+        # Mix all sampled stems
+        rendered_tracks = {
+            "original": track_orig,
+            "melody": track_melody,
+            "bass": track_bass,
+            "drums": track_drums,
+        }
 
-        # Add tracks to MIDI
-        if notes_piano:
-            add_notes_to_track(pm, "piano", notes_piano)
-        if notes_bass:
-            add_notes_to_track(pm, "bass", notes_bass)
-        if notes_drums:
-            add_notes_to_track(pm, "drums", notes_drums)
-        if notes_guitar:
-            add_notes_to_track(pm, "guitar", notes_guitar)
-
-        # Render MIDI tracks to audio waveforms
-        rendered_tracks = render_midi(pm, total_duration=target_duration, sr=self.sample_rate)
-
-        # Include original waveform padded/looped into the track list
-        orig_len = int(target_duration * self.sample_rate)
-        orig_track = np.zeros(orig_len, dtype=np.float32)
-        if len(original_waveform) > 0:
-            copy_len = min(len(original_waveform), orig_len)
-            orig_track[:copy_len] = original_waveform[:copy_len]
-        rendered_tracks["original"] = orig_track
-
-        # Mix all tracks
-        final_mix, separated_tracks = mix_tracks(rendered_tracks)
+        # Track gains for a cohesive, musical mix
+        custom_gains = {
+            "original": 0.95,
+            "melody": 0.80,
+            "bass": 0.90,
+            "drums": 0.85,
+        }
+        final_mix, separated_tracks = mix_tracks(rendered_tracks, custom_gains=custom_gains)
 
         return {
-            "midi": pm,
             "final_mix": final_mix,
             "separated_tracks": separated_tracks,
             "duration": target_duration,
