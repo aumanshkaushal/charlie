@@ -17,17 +17,20 @@ target = sys.argv[1]
 # Mode 1: Directory of stems
 if os.path.isdir(target):
     stems_data = {}
+    stems_durations = {}
     for wav_file in glob.glob(os.path.join(target, "*.wav")):
         stem_name = os.path.splitext(os.path.basename(wav_file))[0]
         try:
             wav, sr = load_audio(wav_file)
+            dur = float(len(wav) / sr)
             wav = normalize_audio(wav)
             spec = compute_stft_spectrogram(wav, sr=sr, n_fft=512, hop_length=128)
             grid = spectrogram_to_grid(spec, max_freq_bins=24, max_time_steps=80)
             stems_data[stem_name] = grid
+            stems_durations[stem_name] = dur
         except Exception:
             pass
-    print(json.dumps({"stems_spectrograms": stems_data}))
+    print(json.dumps({"stems_spectrograms": stems_data, "stems_durations": stems_durations}))
     sys.exit(0)
 
 # Mode 2: Single audio file analysis

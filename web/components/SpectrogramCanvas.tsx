@@ -13,7 +13,7 @@ interface Props {
   onSeek?: (seekTime: number) => void;
 }
 
-// Heatmap: 0.0 (dark purple/black) -> crimson -> neon orange -> bright yellow/white
+// STFT Heatmap color calculation
 function getAudioColor(val: number): string {
   const v = Math.max(0, Math.min(1, val));
   if (v < 0.04) return '#090a12';
@@ -44,15 +44,15 @@ function getAudioColor(val: number): string {
   }
 }
 
-// Generate realistic idle/empty spectrogram data for visual completeness
-function generateIdleSpectrogram(bins = 40, frames = 120): number[][] {
+// Generate realistic ambient idle spectrogram
+function generateIdleSpectrogram(bins = 32, frames = 100): number[][] {
   const data: number[][] = [];
   for (let b = 0; b < bins; b++) {
     const row: number[] = [];
-    const freqFactor = Math.exp(-b / 14);
+    const freqFactor = Math.exp(-b / 12);
     for (let f = 0; f < frames; f++) {
       const noise = (Math.sin(f * 0.18 + b * 0.4) + Math.cos(f * 0.09 - b * 0.2)) * 0.12;
-      const pulse = (f > 30 && f < 45) || (f > 75 && f < 95) ? 0.35 * freqFactor : 0.05 * freqFactor;
+      const pulse = (f > 25 && f < 40) || (f > 65 && f < 80) ? 0.4 * freqFactor : 0.06 * freqFactor;
       row.push(Math.max(0.02, Math.min(0.7, pulse + noise * freqFactor + 0.05)));
     }
     data.push(row);
@@ -63,7 +63,7 @@ function generateIdleSpectrogram(bins = 40, frames = 120): number[][] {
 export default function SpectrogramCanvas({
   matrix,
   width = 600,
-  height = 200,
+  height = 180,
   isEmpty = false,
   emptyText,
   isMini = false,
@@ -72,12 +72,13 @@ export default function SpectrogramCanvas({
   isPlaying = false,
   onSeek,
 }: Props) {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const [hoverX, setHoverX] = useState<number | null>(null);
+  const baseCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [hoverFraction, setHoverFraction] = useState<number | null>(null);
 
-  // Render spectrogram to canvas
+  // 1. Render Base STFT Spectrogram Matrix (Only when matrix or dimensions change)
   useEffect(() => {
-    const canvas = canvasRef.current;
+    const canvas = baseCanvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
@@ -86,7 +87,6 @@ export default function SpectrogramCanvas({
 
     let activeMatrix = matrix;
     if (isEmpty || !matrix || matrix.length === 0) {
-      // Use synthesized ambient spectrogram pattern matching the Excalidraw wireframe
       activeMatrix = generateIdleSpectrogram(isMini ? 24 : 48, isMini ? 80 : 160);
     }
 
@@ -97,96 +97,118 @@ export default function SpectrogramCanvas({
     const cellW = width / numTimeFrames;
     const cellH = height / numFreqBins;
 
-    // Draw spectrogram bottom-up
     for (let f = 0; f < numFreqBins; f++) {
       const row = activeMatrix[f];
       const y = height - (f + 1) * cellH;
 
       for (let t = 0; t < numTimeFrames; t++) {
         const val = row[t] || 0;
-        // In empty state, slightly dim the ambient spectrogram
-        const displayVal = isEmpty ? val * 0.6 : val;
+        const displayVal = isEmpty ? val * 0.55 : val;
         ctx.fillStyle = getAudioColor(displayVal);
         ctx.fillRect(t * cellW, y, cellW + 0.5, cellH + 0.5);
       }
     }
 
-    // If empty text specified, render clean serif label over the ambient spectrogram
+    // Centered label on empty state
     if (isEmpty && emptyText) {
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
       ctx.fillRect(0, height / 2 - 20, width, 40);
 
-      ctx.fillStyle = '#f1f5f9';
-      ctx.font = isMini ? 'italic 13px serif' : 'italic 20px serif';
+      ctx.fillStyle = '#f8fafc';
+      ctx.font = isMini ? 'italic 12px serif' : 'italic 18px serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText(emptyText, width / 2, height / 2);
     }
+  }, [matrix, width, height, isEmpty, emptyText, isMini]);
 
-    // Draw Playhead line if playing or currentTime > 0
-    if (duration > 0 && currentTime >= 0) {
-      const playX = (currentTime / duration) * width;
+  // 2. Render Overlay (Playhead & Hover Seek Cursor - 60fps lightweight)
+  useEffect(() => {
+    const canvas = overlayCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    ctx.clearRect(0, 0, width, height);
+
+    // Playhead Line
+    if (duration > 0 && currentTime >= 0 && (isPlaying || currentTime > 0)) {
+      const progress = Math.max(0, Math.min(1, currentTime / duration));
+      const playX = progress * width;
+
+      // Glow beam
       ctx.beginPath();
       ctx.moveTo(playX, 0);
       ctx.lineTo(playX, height);
-      ctx.lineWidth = 2;
+      ctx.lineWidth = 2.5;
       ctx.strokeStyle = '#38bdf8';
       ctx.shadowColor = '#0284c7';
-      ctx.shadowBlur = 6;
+      ctx.shadowBlur = 8;
       ctx.stroke();
       ctx.shadowBlur = 0;
+
+      // Scrubber head marker at top
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(playX, 4, 3.5, 0, Math.PI * 2);
+      ctx.fill();
     }
 
-    // Draw Hover seek line
-    if (hoverX !== null && !isEmpty) {
+    // Hover Seek Cursor
+    if (hoverFraction !== null && !isEmpty && onSeek) {
+      const hX = hoverFraction * width;
       ctx.beginPath();
-      ctx.moveTo(hoverX, 0);
-      ctx.lineTo(hoverX, height);
+      ctx.moveTo(hX, 0);
+      ctx.lineTo(hX, height);
       ctx.lineWidth = 1;
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.7)';
       ctx.setLineDash([3, 3]);
       ctx.stroke();
       ctx.setLineDash([]);
     }
-  }, [matrix, width, height, isEmpty, emptyText, isMini, duration, currentTime, isPlaying, hoverX]);
+  }, [width, height, duration, currentTime, isPlaying, hoverFraction, isEmpty, onSeek]);
 
   const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (isEmpty || !onSeek) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const x = e.clientX - rect.left;
-    setHoverX(Math.max(0, Math.min(width, (x / rect.width) * width)));
+    setHoverFraction(Math.max(0, Math.min(1, x / rect.width)));
   };
 
   const handleMouseLeave = () => {
-    setHoverX(null);
+    setHoverFraction(null);
   };
 
   const handleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (isEmpty || !onSeek || duration <= 0) return;
     const rect = e.currentTarget.getBoundingClientRect();
-    const clickX = e.clientX - rect.left;
-    const fraction = Math.max(0, Math.min(1, clickX / rect.width));
+    const x = e.clientX - rect.left;
+    const fraction = Math.max(0, Math.min(1, x / rect.width));
     onSeek(fraction * duration);
   };
 
   return (
-    <div className="relative w-full h-full group">
+    <div className="relative w-full h-full select-none">
+      {/* Base Canvas: STFT Spectrogram Heatmap */}
       <canvas
-        ref={canvasRef}
+        ref={baseCanvasRef}
+        width={width}
+        height={height}
+        className="w-full h-full rounded object-cover block"
+      />
+
+      {/* Overlay Canvas: Dynamic Playhead & Hover Scrub Line */}
+      <canvas
+        ref={overlayCanvasRef}
         width={width}
         height={height}
         onMouseMove={handleMouseMove}
         onMouseLeave={handleMouseLeave}
         onClick={handleClick}
-        className={`w-full h-full rounded object-cover ${
+        className={`absolute inset-0 w-full h-full rounded object-cover ${
           !isEmpty && onSeek ? 'cursor-pointer' : ''
         }`}
       />
-      {!isEmpty && onSeek && (
-        <div className="absolute bottom-1 right-2 opacity-0 group-hover:opacity-100 transition-opacity text-[10px] text-white/70 bg-black/60 px-1.5 py-0.5 rounded font-serif pointer-events-none">
-          click to seek
-        </div>
-      )}
     </div>
   );
 }

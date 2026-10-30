@@ -57,17 +57,19 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       // Call analyzer on stemsDir to get real numerical STFT spectrograms for all stems
       execFile(pyPath, [analyzerScript, stemsDir], (stemErr, stemStdout) => {
         let stemsSpectrograms: Record<string, number[][]> = {};
+        let stemsDurations: Record<string, number> = {};
         try {
           if (stemStdout) {
             const parsed = JSON.parse(stemStdout.trim());
             stemsSpectrograms = parsed.stems_spectrograms || {};
+            stemsDurations = parsed.stems_durations || {};
           }
         } catch (parseE) {
           console.error('Failed to parse stem spectrograms:', parseE);
         }
 
         // Collect audio URLs & real spectrograms for each stem
-        const stems: Record<string, { audioUrl: string; spectrogram: number[][] }> = {};
+        const stems: Record<string, { audioUrl: string; spectrogram: number[][]; duration: number }> = {};
         const stemNames = ['original', 'melody', 'drums', 'bass', 'chords'];
 
         for (const name of stemNames) {
@@ -77,24 +79,40 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
             stems[name] = {
               audioUrl: `/api/audio?file=${encodeURIComponent(rel)}`,
               spectrogram: stemsSpectrograms[name] || [],
+              duration: stemsDurations[name] || 14.0,
             };
           }
         }
 
-        // Master audio URL
+        // Master audio URL & Spectrogram
         const latestMaster = path.join(charlieRoot, 'outputs', 'generated', 'latest_composition.wav');
         const masterRel = path.relative(charlieRoot, latestMaster);
 
-        res.status(200).json({
-          success: true,
-          seed: targetSeed,
-          genre: genre || 'auto',
-          musical: Boolean(musical),
-          masterUrl: `/api/audio?file=${encodeURIComponent(masterRel)}`,
-          stems,
-          outputLog: stdout,
+        // Analyze master
+        execFile(pyPath, [analyzerScript, latestMaster], (masterErr, masterStdout) => {
+          let masterSpectrogram: number[][] = [];
+          let masterDuration = 14.0;
+          try {
+            if (masterStdout) {
+              const mParsed = JSON.parse(masterStdout.trim());
+              masterSpectrogram = mParsed.spectrogram || [];
+              masterDuration = mParsed.duration || 14.0;
+            }
+          } catch {}
+
+          res.status(200).json({
+            success: true,
+            seed: targetSeed,
+            genre: genre || 'auto',
+            musical: Boolean(musical),
+            masterUrl: `/api/audio?file=${encodeURIComponent(masterRel)}`,
+            masterSpectrogram,
+            masterDuration,
+            stems,
+            outputLog: stdout,
+          });
+          resolve();
         });
-        resolve();
       });
     });
   });
