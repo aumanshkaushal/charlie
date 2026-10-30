@@ -1,0 +1,16 @@
+{
+  "baseline": {
+    "rhythm_bce": 0.6907,
+    "harmony_ce": 2.4789,
+    "instrument_bce": 0.7013
+  },
+  "trained": {
+    "rhythm_bce": 0.3932,
+    "harmony_ce": 1.9866,
+    "instrument_bce": 0.1739
+  },
+  "improvements": {
+    "rhythm_loss_reduction_pct": 43.1,
+    "instrument_loss_reduction_pct": 75.2
+  }
+}

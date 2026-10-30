@@ -1,0 +1,47 @@
+# Virtual Environment
+.venv/
+env/
+venv/
+ENV/
+
+# Large Datasets and Downloaded Pretrained Models
+models/
+dataset/
+datasets/
+
+# Generated outputs and temporary audio files
+outputs/
+temp/
+*.wav
+*.mp3
+*.mid
+*.midi
+
+# Checkpoints (exclude huge intermediate weights, track specific small final checkpoints if desired)
+checkpoints/*.tmp
+checkpoints/*_interim*.pt
+
+# Python cache and byte-code
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node / Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env.local
+frontend/.env.*.local
+dist/
+node_modules/
+
+# IDE & OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
