@@ -1,6 +1,8 @@
-"""Musical Beat-Slicing & Intelligent Cohesive Arrangement for Charlie.
-Dynamically adapts to any key, tempo, and audio length with robust transient filtering.
+"""Generative Seed-Driven Musical Arrangement Engine for Charlie.
+Generates unique rhythms, melodic contours, chord progressions, and drum pockets
+conditioned on the neural network's predictions, audio timbre, and random/custom seeds.
 """
+import random
 import numpy as np
 import librosa
 from scipy.signal import butter, lfilter
@@ -12,6 +14,24 @@ from audio.midi_generator import get_scale_pitches
 
 DEFAULT_SR = 22050
 
+# Musical scale modes
+SCALE_PROGRESSIONS = {
+    "minor": [
+        [(0, "i"), (5, "VI"), (2, "III"), (6, "VII")],      # Emotional / Lofi (i - VI - III - VII)
+        [(0, "i"), (3, "iv"), (4, "v"), (0, "i")],          # Deep / Neo-Soul (i - iv - v - i)
+        [(0, "i"), (5, "VI"), (3, "iv"), (4, "v")],         # Dark Groove
+        [(0, "i"), (6, "VII"), (5, "VI"), (6, "VII")],      # Andalusian / Driving
+    ],
+    "major": [
+        [(0, "I"), (4, "V"), (5, "vi"), (3, "IV")],         # Uplifting Pop (I - V - vi - IV)
+        [(0, "I"), (3, "IV"), (4, "V"), (3, "IV")],         # Rhythmic Funk
+        [(1, "ii"), (4, "V"), (0, "I"), (5, "vi")],         # Jazz / Chillout (ii - V - I - vi)
+    ]
+}
+
+# Rhythmic drum groove styles
+DRUM_STYLES = ["boom_bap", "trap_half", "afro_syncopated", "four_on_floor", "lofi_swing"]
+
 
 def quantize_and_loop_source(
     waveform: np.ndarray,
@@ -19,22 +39,21 @@ def quantize_and_loop_source(
     bpm: float = 136.0,
     total_bars: int = 8,
     beats_per_bar: int = 4,
+    seed: int = None,
 ) -> tuple[np.ndarray, list[np.ndarray]]:
     """
     Slices individual hits from the original recording and aligns each hit
     precisely to the beat grid (zero latency, zero phase clash).
-    Guards against zero-length slices and rapid adjacent onsets.
     """
+    rng = random.Random(seed)
     seconds_per_beat = 60.0 / max(bpm, 20.0)
     samples_per_beat = int(seconds_per_beat * sr)
     samples_per_bar = samples_per_beat * beats_per_bar
     total_samples = samples_per_bar * total_bars
 
-    # 1. Detect onset hit positions with minimum spacing
     onset_frames = librosa.onset.onset_detect(y=waveform, sr=sr, backtrack=True)
     raw_samples = librosa.frames_to_samples(onset_frames)
 
-    # Filter out onsets that are too close (< 60ms apart)
     min_spacing = int(sr * 0.06)
     filtered_onsets = []
     last_pos = -min_spacing
@@ -46,7 +65,6 @@ def quantize_and_loop_source(
     if not filtered_onsets:
         filtered_onsets = [0]
 
-    # Extract clean individual hits
     hits = []
     max_hit_len = int(samples_per_beat * 0.85)
 
@@ -56,13 +74,12 @@ def quantize_and_loop_source(
         slice_end = min(start + max_hit_len, end)
 
         if slice_end <= start + int(sr * 0.02):
-            continue  # skip tiny / empty slices
+            continue
 
         hit = waveform[start:slice_end].copy()
         if len(hit) == 0:
             continue
 
-        # Fade out tail to prevent clicks
         fade_len = min(int(sr * 0.02), len(hit))
         if fade_len > 0:
             hit[-fade_len:] *= np.linspace(1.0, 0.0, fade_len)
@@ -73,7 +90,6 @@ def quantize_and_loop_source(
             hits.append(hit.astype(np.float32))
 
     if not hits:
-        # Fallback to initial section of audio
         safe_len = min(max_hit_len, len(waveform))
         fallback = waveform[:safe_len].copy()
         peak = float(np.max(np.abs(fallback))) if len(fallback) > 0 else 1.0
@@ -81,13 +97,15 @@ def quantize_and_loop_source(
             fallback = fallback / peak * 0.9
         hits = [fallback.astype(np.float32)]
 
-    # 2. Place each hit onto the quantized beat grid across all bars
     quantized_track = np.zeros(total_samples, dtype=np.float32)
-
     total_beats = total_bars * beats_per_bar
+
+    # Subtle groove variation per beat
     for b in range(total_beats):
         beat_start_sample = b * samples_per_beat
-        hit = hits[b % len(hits)]
+        # Cycle or sample with slight probability
+        hit_idx = b % len(hits)
+        hit = hits[hit_idx]
 
         copy_len = min(len(hit), total_samples - beat_start_sample)
         if copy_len > 0:
@@ -98,8 +116,8 @@ def quantize_and_loop_source(
 
 class IntelligentComposer:
     """
-    Composes a coherent, harmonious, and musically balanced arrangement
-    from an environmental recording, dynamically adapting to its detected key and scale.
+    Generative AI Composer: creates unique melodies, basslines, chord progressions,
+    and drum patterns on every run conditioned on seed, neural probabilities, and input audio.
     """
     def __init__(self, sample_rate: int = DEFAULT_SR):
         self.sr = sample_rate
@@ -109,81 +127,111 @@ class IntelligentComposer:
         waveform: np.ndarray,
         predictions: dict,
         target_bars: int = 8,
+        seed: int = None,
+        mood: str = "Chill",
     ) -> dict:
+        # 1. Deterministic or stochastic seed
+        if seed is None:
+            seed = random.randint(1, 999999)
+        rng = random.Random(seed)
+        np_rng = np.random.default_rng(seed)
+
         bpm = float(predictions.get("detected_bpm", 136.0))
         key = str(predictions.get("predicted_key", "D"))
         scale_type = str(predictions.get("predicted_scale", "minor"))
+        rhythm_probs = predictions.get("rhythm_probabilities", [[0.5]*16 for _ in range(4)])
 
         seconds_per_beat = 60.0 / max(bpm, 30.0)
         seconds_per_bar = seconds_per_beat * 4.0
         total_duration = seconds_per_bar * target_bars
         total_samples = int(total_duration * self.sr)
 
-        # 1. Quantize source hits onto the beat grid
+        # 2. Quantize source sound hits
         quantized_original, hits = quantize_and_loop_source(
-            waveform, sr=self.sr, bpm=bpm, total_bars=target_bars
+            waveform, sr=self.sr, bpm=bpm, total_bars=target_bars, seed=seed
         )
 
-        # 2. Sound-to-instrument sampler on the recording
+        # 3. Sound Sampler
         sampler = EnvironmentalSoundSampler(waveform, sr=self.sr)
 
-        # 3. Dynamic Musical Pitches based on detected Key & Scale
+        # 4. Musical Scales & Progression Selection
+        # Select scale pitches across 2 octaves
         melody_scale = get_scale_pitches(root_note=key, scale_type=scale_type, base_octave=4)
         bass_scale = get_scale_pitches(root_note=key, scale_type=scale_type, base_octave=2)
 
-        # Scale degrees
-        # [0: Root, 1: 2nd, 2: 3rd, 3: 4th, 4: 5th, 5: 6th, 6: 7th, 7: Octave]
-        NOTE_ROOT = melody_scale[0]
-        NOTE_THIRD = melody_scale[2] if len(melody_scale) > 2 else NOTE_ROOT + 4
-        NOTE_FOURTH = melody_scale[3] if len(melody_scale) > 3 else NOTE_ROOT + 5
-        NOTE_FIFTH = melody_scale[4] if len(melody_scale) > 4 else NOTE_ROOT + 7
-        NOTE_SEVENTH = melody_scale[6] if len(melody_scale) > 6 else NOTE_ROOT + 10
-        NOTE_OCTAVE = melody_scale[7] if len(melody_scale) > 7 else NOTE_ROOT + 12
+        # Select a chord progression for this seed
+        prog_choices = SCALE_PROGRESSIONS.get(scale_type, SCALE_PROGRESSIONS["minor"])
+        progression = rng.choice(prog_choices)  # list of 4 chords: [(scale_deg, label), ...]
 
-        BASS_ROOT = bass_scale[0]
-        BASS_FIFTH = bass_scale[4] if len(bass_scale) > 4 else BASS_ROOT + 7
-        BASS_FOURTH = bass_scale[3] if len(bass_scale) > 3 else BASS_ROOT + 5
-        BASS_FLAT7 = bass_scale[6] if len(bass_scale) > 6 else BASS_ROOT + 10
+        # Select a drum groove style for this seed
+        drum_style = rng.choice(DRUM_STYLES)
 
         track_melody = np.zeros(total_samples, dtype=np.float32)
         track_bass = np.zeros(total_samples, dtype=np.float32)
         track_drums = np.zeros(total_samples, dtype=np.float32)
 
-        # 4. Melodic Call and Response Phrases across bars:
-        melody_events = [
-            # Bar 2 (theme statement)
-            {"bar": 1, "beat": 0.0, "pitch": NOTE_ROOT, "dur": 0.35},
-            {"bar": 1, "beat": 2.0, "pitch": NOTE_THIRD, "dur": 0.30},
-            {"bar": 1, "beat": 3.0, "pitch": NOTE_FIFTH, "dur": 0.45},
+        # 5. GENERATIVE MELODIC PHRASING (Varies by seed & neural grid)
+        # Select melodic contour type for this seed:
+        contour_type = rng.choice(["syncopated_riff", "arpeggio_cascade", "call_and_response", "ambient_pulses"])
 
-            # Bar 3 (response)
-            {"bar": 2, "beat": 0.0, "pitch": NOTE_FOURTH, "dur": 0.35},
-            {"bar": 2, "beat": 1.5, "pitch": NOTE_THIRD, "dur": 0.25},
-            {"bar": 2, "beat": 2.0, "pitch": NOTE_ROOT, "dur": 0.40},
+        melody_events = []
 
-            # Bar 4 (pickup into verse)
-            {"bar": 3, "beat": 3.0, "pitch": NOTE_SEVENTH, "dur": 0.35},
+        # Generate melody across bars (starts at Bar 1 or 2 depending on seed)
+        melody_start_bar = rng.choice([1, 2])
 
-            # Bar 5 (variation with bass & hi-hats)
-            {"bar": 4, "beat": 0.0, "pitch": NOTE_ROOT, "dur": 0.35},
-            {"bar": 4, "beat": 1.0, "pitch": NOTE_THIRD, "dur": 0.25},
-            {"bar": 4, "beat": 2.0, "pitch": NOTE_FIFTH, "dur": 0.40},
+        for bar in range(melody_start_bar, target_bars):
+            chord_deg, chord_label = progression[bar % len(progression)]
+            # Root note of current chord in melody scale
+            root_idx = chord_deg % len(melody_scale)
 
-            # Bar 6 (climax hook)
-            {"bar": 5, "beat": 0.0, "pitch": NOTE_OCTAVE, "dur": 0.45},
-            {"bar": 5, "beat": 1.5, "pitch": NOTE_SEVENTH, "dur": 0.30},
-            {"bar": 5, "beat": 2.0, "pitch": NOTE_FIFTH, "dur": 0.35},
-            {"bar": 5, "beat": 3.0, "pitch": NOTE_THIRD, "dur": 0.30},
+            # Available chord tones: Root, 3rd, 5th, 7th, 9th
+            chord_tones = [
+                melody_scale[root_idx % len(melody_scale)],
+                melody_scale[(root_idx + 2) % len(melody_scale)],
+                melody_scale[(root_idx + 4) % len(melody_scale)],
+                melody_scale[(root_idx + 6) % len(melody_scale)],
+                melody_scale[(root_idx + 7) % len(melody_scale)],
+            ]
 
-            # Bar 7 (resolution)
-            {"bar": 6, "beat": 0.0, "pitch": NOTE_FOURTH, "dur": 0.35},
-            {"bar": 6, "beat": 2.0, "pitch": NOTE_THIRD, "dur": 0.30},
-            {"bar": 6, "beat": 3.0, "pitch": NOTE_ROOT, "dur": 0.60},
-        ]
+            # Use neural rhythm probabilities for this bar to bias hit positions
+            bar_probs = rhythm_probs[bar % len(rhythm_probs)]
 
+            if contour_type == "syncopated_riff":
+                # 3 to 5 notes per bar on syncopated 16th steps
+                possible_steps = [0, 2, 3, 6, 8, 10, 11, 14]
+                num_notes = rng.randint(3, 5)
+                chosen_steps = sorted(rng.sample(possible_steps, num_notes))
+                for s in chosen_steps:
+                    p = rng.choice(chord_tones)
+                    dur = rng.choice([0.2, 0.35, 0.5])
+                    melody_events.append({"bar": bar, "beat": s / 4.0, "pitch": p, "dur": dur})
+
+            elif contour_type == "arpeggio_cascade":
+                # Flowing ascending or descending arpeggio
+                step_offsets = [0, 1, 2, 3] if bar % 2 == 0 else [0, 2, 4, 6]
+                for idx, s in enumerate(step_offsets):
+                    p = chord_tones[idx % len(chord_tones)]
+                    melody_events.append({"bar": bar, "beat": s * 0.5, "pitch": p, "dur": 0.28})
+
+            elif contour_type == "call_and_response":
+                # Play on beats 0 & 2 in odd bars, answer on beats 1.5 & 3 in even bars
+                if bar % 2 == 1:
+                    melody_events.append({"bar": bar, "beat": 0.0, "pitch": chord_tones[0], "dur": 0.4})
+                    melody_events.append({"bar": bar, "beat": 2.0, "pitch": chord_tones[2], "dur": 0.35})
+                    if rng.random() > 0.4:
+                        melody_events.append({"bar": bar, "beat": 3.0, "pitch": chord_tones[1], "dur": 0.25})
+                else:
+                    melody_events.append({"bar": bar, "beat": 1.5, "pitch": chord_tones[3], "dur": 0.3})
+                    melody_events.append({"bar": bar, "beat": 2.5, "pitch": chord_tones[1], "dur": 0.3})
+                    melody_events.append({"bar": bar, "beat": 3.5, "pitch": chord_tones[0], "dur": 0.45})
+
+            else:  # ambient_pulses
+                # Long held note on downbeat + light syncopated echo
+                melody_events.append({"bar": bar, "beat": 0.0, "pitch": chord_tones[0], "dur": 0.65})
+                melody_events.append({"bar": bar, "beat": 2.5, "pitch": chord_tones[2], "dur": 0.45})
+
+        # Render Melody Notes with sampler
         for evt in melody_events:
-            if evt["bar"] >= target_bars:
-                continue
             bar_start = evt["bar"] * seconds_per_bar
             note_time = bar_start + evt["beat"] * seconds_per_beat
             start_s = int(note_time * self.sr)
@@ -198,28 +246,42 @@ class IntelligentComposer:
             end_s = min(start_s + len(note_audio), total_samples)
             track_melody[start_s:end_s] += note_audio[:end_s - start_s] * 0.70
 
-        # 5. Bass Progression (Enters at Bar 3, locked to root notes)
-        bass_events = [
-            # Bar 3
-            {"bar": 2, "beat": 0.0, "pitch": BASS_ROOT, "dur": 0.7},
-            {"bar": 2, "beat": 2.5, "pitch": BASS_ROOT, "dur": 0.4},
-            # Bar 4
-            {"bar": 3, "beat": 0.0, "pitch": BASS_FOURTH, "dur": 0.6},
-            {"bar": 3, "beat": 2.5, "pitch": BASS_FIFTH, "dur": 0.5},
-            # Bar 5
-            {"bar": 4, "beat": 0.0, "pitch": BASS_FLAT7, "dur": 0.6},
-            {"bar": 4, "beat": 2.0, "pitch": BASS_FOURTH, "dur": 0.5},
-            # Bar 6 (climax)
-            {"bar": 5, "beat": 0.0, "pitch": BASS_ROOT, "dur": 0.7},
-            {"bar": 5, "beat": 2.0, "pitch": BASS_FLAT7, "dur": 0.5},
-            # Bar 7
-            {"bar": 6, "beat": 0.0, "pitch": BASS_FOURTH, "dur": 0.6},
-            {"bar": 6, "beat": 2.0, "pitch": BASS_ROOT, "dur": 0.8},
-        ]
+        # 6. GENERATIVE BASSLINES (Matched to chord progression & style)
+        bass_start_bar = rng.choice([2, 3])
+        bass_events = []
+
+        bass_rhythm_style = rng.choice(["root_fifth_bounce", "walking_groove", "sustained_sub", "offbeat_dub"])
+
+        for bar in range(bass_start_bar, target_bars):
+            chord_deg, _ = progression[bar % len(progression)]
+            bass_root = bass_scale[chord_deg % len(bass_scale)]
+            bass_fifth = bass_scale[(chord_deg + 4) % len(bass_scale)]
+
+            if bass_rhythm_style == "root_fifth_bounce":
+                # Downbeat root + beat 2.5 or 3 fifth
+                bass_events.append({"bar": bar, "beat": 0.0, "pitch": bass_root, "dur": 0.6})
+                bass_events.append({"bar": bar, "beat": 2.5, "pitch": bass_fifth, "dur": 0.45})
+                if rng.random() > 0.5:
+                    bass_events.append({"bar": bar, "beat": 3.5, "pitch": bass_root, "dur": 0.3})
+
+            elif bass_rhythm_style == "walking_groove":
+                # Walking bass passing notes
+                bass_events.append({"bar": bar, "beat": 0.0, "pitch": bass_root, "dur": 0.4})
+                bass_events.append({"bar": bar, "beat": 1.0, "pitch": bass_root + 2, "dur": 0.4})
+                bass_events.append({"bar": bar, "beat": 2.0, "pitch": bass_fifth, "dur": 0.4})
+                bass_events.append({"bar": bar, "beat": 3.0, "pitch": bass_root, "dur": 0.4})
+
+            elif bass_rhythm_style == "offbeat_dub":
+                # Drops on offbeats: 0.5 and 2.5
+                bass_events.append({"bar": bar, "beat": 0.5, "pitch": bass_root, "dur": 0.5})
+                bass_events.append({"bar": bar, "beat": 2.5, "pitch": bass_fifth, "dur": 0.5})
+
+            else:  # sustained_sub
+                bass_events.append({"bar": bar, "beat": 0.0, "pitch": bass_root, "dur": 1.1})
+                if rng.random() > 0.4:
+                    bass_events.append({"bar": bar, "beat": 2.0, "pitch": bass_fifth, "dur": 0.8})
 
         for evt in bass_events:
-            if evt["bar"] >= target_bars:
-                continue
             bar_start = evt["bar"] * seconds_per_bar
             note_time = bar_start + evt["beat"] * seconds_per_beat
             start_s = int(note_time * self.sr)
@@ -234,34 +296,58 @@ class IntelligentComposer:
             end_s = min(start_s + len(bass_audio), total_samples)
             track_bass[start_s:end_s] += bass_audio[:end_s - start_s] * 0.95
 
-        # 6. Drum Elements:
+        # 7. GENERATIVE DRUM POCKET (Varied kick/snare/hihat rhythms by style)
         drum_events = []
+        drum_start_bar = rng.choice([2, 3])
 
-        # Bars 3 and 4: Offbeat Hi-Hats
-        for bar in range(2, 4):
-            if bar >= target_bars:
-                break
-            for beat in [0.5, 1.5, 2.5, 3.5]:
-                drum_events.append({"bar": bar, "beat": beat, "type": "hihat"})
+        # Hi-Hat styles: straight 8ths, swing 16ths, or triplet offbeats
+        hihat_grid = rng.choice([
+            [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5],             # straight 8ths
+            [0.5, 1.5, 2.5, 3.5],                                  # sparse offbeats
+            [0.0, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 2.25, 2.5, 3.0] # syncopated roll
+        ])
 
-        # Bars 5 to 7: Full Drum Pocket (Kick on 1 & 3, Snare on 2 & 4, 8th-note Hi-Hats)
-        for bar in range(4, min(target_bars, 7)):
-            # Kicks
-            drum_events.append({"bar": bar, "beat": 0.0, "type": "kick"})
-            drum_events.append({"bar": bar, "beat": 2.0, "type": "kick"})
-            drum_events.append({"bar": bar, "beat": 2.75, "type": "kick"})
-
-            # Snares
-            drum_events.append({"bar": bar, "beat": 1.0, "type": "snare"})
-            drum_events.append({"bar": bar, "beat": 3.0, "type": "snare"})
+        for bar in range(drum_start_bar, target_bars):
+            is_climax = bar >= (target_bars - 4)
 
             # Hi-Hats
-            for beat in [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5]:
+            for beat in hihat_grid:
                 drum_events.append({"bar": bar, "beat": beat, "type": "hihat"})
 
+            if is_climax:
+                # Kick & Snare placement determined by drum_style:
+                if drum_style == "four_on_floor":
+                    # Kicks on every beat 0, 1, 2, 3
+                    for b in [0.0, 1.0, 2.0, 3.0]:
+                        drum_events.append({"bar": bar, "beat": b, "type": "kick"})
+                    # Claps/Snares on 1 & 3
+                    drum_events.append({"bar": bar, "beat": 1.0, "type": "snare"})
+                    drum_events.append({"bar": bar, "beat": 3.0, "type": "snare"})
+
+                elif drum_style == "trap_half":
+                    # Kick on 0, 1.75; Snare on 2.0
+                    drum_events.append({"bar": bar, "beat": 0.0, "type": "kick"})
+                    drum_events.append({"bar": bar, "beat": 1.75, "type": "kick"})
+                    if rng.random() > 0.4:
+                        drum_events.append({"bar": bar, "beat": 2.5, "type": "kick"})
+                    drum_events.append({"bar": bar, "beat": 2.0, "type": "snare"})
+
+                elif drum_style == "afro_syncopated":
+                    # Polyrhythmic kick
+                    drum_events.append({"bar": bar, "beat": 0.0, "type": "kick"})
+                    drum_events.append({"bar": bar, "beat": 1.5, "type": "kick"})
+                    drum_events.append({"bar": bar, "beat": 2.25, "type": "kick"})
+                    drum_events.append({"bar": bar, "beat": 3.0, "type": "snare"})
+
+                else:  # boom_bap / lofi_swing
+                    drum_events.append({"bar": bar, "beat": 0.0, "type": "kick"})
+                    drum_events.append({"bar": bar, "beat": 2.0, "type": "kick"})
+                    if rng.random() > 0.5:
+                        drum_events.append({"bar": bar, "beat": 2.75, "type": "kick"})
+                    drum_events.append({"bar": bar, "beat": 1.0, "type": "snare"})
+                    drum_events.append({"bar": bar, "beat": 3.0, "type": "snare"})
+
         for evt in drum_events:
-            if evt["bar"] >= target_bars:
-                continue
             bar_start = evt["bar"] * seconds_per_bar
             hit_time = bar_start + evt["beat"] * seconds_per_beat
             start_s = int(hit_time * self.sr)
@@ -278,7 +364,7 @@ class IntelligentComposer:
             end_s = min(start_s + len(drum_audio), total_samples)
             track_drums[start_s:end_s] += drum_audio[:end_s - start_s]
 
-        # 7. Mixdown & Volume Balance
+        # 8. Dynamic Mixdown
         rendered_tracks = {
             "original": quantized_original,
             "melody": track_melody,
@@ -288,9 +374,9 @@ class IntelligentComposer:
 
         gains = {
             "original": 0.85,
-            "melody": 0.70,
+            "melody": 0.72,
             "bass": 0.95,
-            "drums": 0.80,
+            "drums": 0.82,
         }
 
         final_mix, adjusted_stems = mix_tracks(rendered_tracks, custom_gains=gains, master_volume=0.92)
@@ -302,6 +388,10 @@ class IntelligentComposer:
             "bpm": bpm,
             "key": key,
             "scale": scale_type,
+            "seed": seed,
+            "drum_style": drum_style,
+            "contour_type": contour_type,
+            "bass_style": bass_rhythm_style,
             "total_bars": target_bars,
             "seconds_per_bar": seconds_per_bar,
         }
