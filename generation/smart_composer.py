@@ -1,13 +1,13 @@
 """Musical Beat-Slicing & Intelligent Cohesive Arrangement for Charlie.
-Locks the user's recorded audio to the rhythmic grid, eliminates flams/clashes,
-and composes a coherent, structured musical piece where every element complements the groove.
+Dynamically adapts to any key, tempo, and audio length with robust transient filtering.
 """
 import numpy as np
 import librosa
 from scipy.signal import butter, lfilter
-from audio.features import extract_features
+from audio.features import extract_features, NOTE_NAMES
 from audio.sampler import EnvironmentalSoundSampler, butter_lowpass_filter, butter_highpass_filter
 from audio.mixer import mix_tracks
+from audio.midi_generator import get_scale_pitches
 
 
 DEFAULT_SR = 22050
@@ -23,39 +23,63 @@ def quantize_and_loop_source(
     """
     Slices individual hits from the original recording and aligns each hit
     precisely to the beat grid (zero latency, zero phase clash).
+    Guards against zero-length slices and rapid adjacent onsets.
     """
     seconds_per_beat = 60.0 / max(bpm, 20.0)
     samples_per_beat = int(seconds_per_beat * sr)
     samples_per_bar = samples_per_beat * beats_per_bar
     total_samples = samples_per_bar * total_bars
 
-    # 1. Detect all onset hit positions
+    # 1. Detect onset hit positions with minimum spacing
     onset_frames = librosa.onset.onset_detect(y=waveform, sr=sr, backtrack=True)
-    onset_samples = librosa.frames_to_samples(onset_frames)
+    raw_samples = librosa.frames_to_samples(onset_frames)
 
-    if len(onset_samples) == 0:
-        onset_samples = np.array([0])
+    # Filter out onsets that are too close (< 60ms apart)
+    min_spacing = int(sr * 0.06)
+    filtered_onsets = []
+    last_pos = -min_spacing
+    for pos in raw_samples:
+        if pos - last_pos >= min_spacing and pos < len(waveform) - min_spacing:
+            filtered_onsets.append(pos)
+            last_pos = pos
+
+    if not filtered_onsets:
+        filtered_onsets = [0]
 
     # Extract clean individual hits
     hits = []
     max_hit_len = int(samples_per_beat * 0.85)
-    for i in range(len(onset_samples)):
-        start = onset_samples[i]
-        end = onset_samples[i + 1] if i + 1 < len(onset_samples) else len(waveform)
-        hit = waveform[start:min(start + max_hit_len, end)].copy()
+
+    for i in range(len(filtered_onsets)):
+        start = filtered_onsets[i]
+        end = filtered_onsets[i + 1] if i + 1 < len(filtered_onsets) else len(waveform)
+        slice_end = min(start + max_hit_len, end)
+
+        if slice_end <= start + int(sr * 0.02):
+            continue  # skip tiny / empty slices
+
+        hit = waveform[start:slice_end].copy()
+        if len(hit) == 0:
+            continue
 
         # Fade out tail to prevent clicks
         fade_len = min(int(sr * 0.02), len(hit))
         if fade_len > 0:
             hit[-fade_len:] *= np.linspace(1.0, 0.0, fade_len)
 
-        peak = np.max(np.abs(hit))
+        peak = float(np.max(np.abs(hit)))
         if peak > 0.01:
             hit = hit / peak * 0.9
-        hits.append(hit.astype(np.float32))
+            hits.append(hit.astype(np.float32))
 
     if not hits:
-        hits = [waveform[:max_hit_len]]
+        # Fallback to initial section of audio
+        safe_len = min(max_hit_len, len(waveform))
+        fallback = waveform[:safe_len].copy()
+        peak = float(np.max(np.abs(fallback))) if len(fallback) > 0 else 1.0
+        if peak > 0:
+            fallback = fallback / peak * 0.9
+        hits = [fallback.astype(np.float32)]
 
     # 2. Place each hit onto the quantized beat grid across all bars
     quantized_track = np.zeros(total_samples, dtype=np.float32)
@@ -75,7 +99,7 @@ def quantize_and_loop_source(
 class IntelligentComposer:
     """
     Composes a coherent, harmonious, and musically balanced arrangement
-    from an environmental recording.
+    from an environmental recording, dynamically adapting to its detected key and scale.
     """
     def __init__(self, sample_rate: int = DEFAULT_SR):
         self.sr = sample_rate
@@ -86,14 +110,16 @@ class IntelligentComposer:
         predictions: dict,
         target_bars: int = 8,
     ) -> dict:
-        bpm = predictions.get("detected_bpm", 136.0)
-        seconds_per_beat = 60.0 / bpm
+        bpm = float(predictions.get("detected_bpm", 136.0))
+        key = str(predictions.get("predicted_key", "D"))
+        scale_type = str(predictions.get("predicted_scale", "minor"))
+
+        seconds_per_beat = 60.0 / max(bpm, 30.0)
         seconds_per_bar = seconds_per_beat * 4.0
         total_duration = seconds_per_bar * target_bars
         total_samples = int(total_duration * self.sr)
-        samples_per_beat = int(seconds_per_beat * self.sr)
 
-        # 1. Perfectly quantize original mug hits onto the beat grid
+        # 1. Quantize source hits onto the beat grid
         quantized_original, hits = quantize_and_loop_source(
             waveform, sr=self.sr, bpm=bpm, total_bars=target_bars
         )
@@ -101,61 +127,58 @@ class IntelligentComposer:
         # 2. Sound-to-instrument sampler on the recording
         sampler = EnvironmentalSoundSampler(waveform, sr=self.sr)
 
-        # 3. Musical Pitch Definitions for D Minor
-        NOTE_D4 = 62
-        NOTE_E4 = 64
-        NOTE_F4 = 65
-        NOTE_G4 = 67
-        NOTE_A4 = 69
-        NOTE_C5 = 72
-        NOTE_D5 = 74
+        # 3. Dynamic Musical Pitches based on detected Key & Scale
+        melody_scale = get_scale_pitches(root_note=key, scale_type=scale_type, base_octave=4)
+        bass_scale = get_scale_pitches(root_note=key, scale_type=scale_type, base_octave=2)
 
-        BASS_D = 38
-        BASS_BB = 34
-        BASS_C = 36
-        BASS_A = 33
+        # Scale degrees
+        # [0: Root, 1: 2nd, 2: 3rd, 3: 4th, 4: 5th, 5: 6th, 6: 7th, 7: Octave]
+        NOTE_ROOT = melody_scale[0]
+        NOTE_THIRD = melody_scale[2] if len(melody_scale) > 2 else NOTE_ROOT + 4
+        NOTE_FOURTH = melody_scale[3] if len(melody_scale) > 3 else NOTE_ROOT + 5
+        NOTE_FIFTH = melody_scale[4] if len(melody_scale) > 4 else NOTE_ROOT + 7
+        NOTE_SEVENTH = melody_scale[6] if len(melody_scale) > 6 else NOTE_ROOT + 10
+        NOTE_OCTAVE = melody_scale[7] if len(melody_scale) > 7 else NOTE_ROOT + 12
+
+        BASS_ROOT = bass_scale[0]
+        BASS_FIFTH = bass_scale[4] if len(bass_scale) > 4 else BASS_ROOT + 7
+        BASS_FOURTH = bass_scale[3] if len(bass_scale) > 3 else BASS_ROOT + 5
+        BASS_FLAT7 = bass_scale[6] if len(bass_scale) > 6 else BASS_ROOT + 10
 
         track_melody = np.zeros(total_samples, dtype=np.float32)
         track_bass = np.zeros(total_samples, dtype=np.float32)
         track_drums = np.zeros(total_samples, dtype=np.float32)
 
-        # 4. Melodic Call and Response Phrases across 8 bars:
-        # Bars 0-1 (Intro): Original mug beat solo -> establishes pure rhythm.
-        # Bar 2: Riff A (Theme)
-        # Bar 3: Riff B (Response)
-        # Bar 4: Space / transition
-        # Bar 5: Riff A' (Theme variation with bass)
-        # Bar 6: Full Hook Climax (D5 high melody note)
-        # Bar 7: Resolution to D4 root
+        # 4. Melodic Call and Response Phrases across bars:
         melody_events = [
             # Bar 2 (theme statement)
-            {"bar": 1, "beat": 0.0, "pitch": NOTE_D4, "dur": 0.35},
-            {"bar": 1, "beat": 2.0, "pitch": NOTE_F4, "dur": 0.30},
-            {"bar": 1, "beat": 3.0, "pitch": NOTE_A4, "dur": 0.45},
+            {"bar": 1, "beat": 0.0, "pitch": NOTE_ROOT, "dur": 0.35},
+            {"bar": 1, "beat": 2.0, "pitch": NOTE_THIRD, "dur": 0.30},
+            {"bar": 1, "beat": 3.0, "pitch": NOTE_FIFTH, "dur": 0.45},
 
             # Bar 3 (response)
-            {"bar": 2, "beat": 0.0, "pitch": NOTE_G4, "dur": 0.35},
-            {"bar": 2, "beat": 1.5, "pitch": NOTE_F4, "dur": 0.25},
-            {"bar": 2, "beat": 2.0, "pitch": NOTE_D4, "dur": 0.40},
+            {"bar": 2, "beat": 0.0, "pitch": NOTE_FOURTH, "dur": 0.35},
+            {"bar": 2, "beat": 1.5, "pitch": NOTE_THIRD, "dur": 0.25},
+            {"bar": 2, "beat": 2.0, "pitch": NOTE_ROOT, "dur": 0.40},
 
             # Bar 4 (pickup into verse)
-            {"bar": 3, "beat": 3.0, "pitch": NOTE_C5, "dur": 0.35},
+            {"bar": 3, "beat": 3.0, "pitch": NOTE_SEVENTH, "dur": 0.35},
 
             # Bar 5 (variation with bass & hi-hats)
-            {"bar": 4, "beat": 0.0, "pitch": NOTE_D4, "dur": 0.35},
-            {"bar": 4, "beat": 1.0, "pitch": NOTE_F4, "dur": 0.25},
-            {"bar": 4, "beat": 2.0, "pitch": NOTE_A4, "dur": 0.40},
+            {"bar": 4, "beat": 0.0, "pitch": NOTE_ROOT, "dur": 0.35},
+            {"bar": 4, "beat": 1.0, "pitch": NOTE_THIRD, "dur": 0.25},
+            {"bar": 4, "beat": 2.0, "pitch": NOTE_FIFTH, "dur": 0.40},
 
             # Bar 6 (climax hook)
-            {"bar": 5, "beat": 0.0, "pitch": NOTE_D5, "dur": 0.45},
-            {"bar": 5, "beat": 1.5, "pitch": NOTE_C5, "dur": 0.30},
-            {"bar": 5, "beat": 2.0, "pitch": NOTE_A4, "dur": 0.35},
-            {"bar": 5, "beat": 3.0, "pitch": NOTE_F4, "dur": 0.30},
+            {"bar": 5, "beat": 0.0, "pitch": NOTE_OCTAVE, "dur": 0.45},
+            {"bar": 5, "beat": 1.5, "pitch": NOTE_SEVENTH, "dur": 0.30},
+            {"bar": 5, "beat": 2.0, "pitch": NOTE_FIFTH, "dur": 0.35},
+            {"bar": 5, "beat": 3.0, "pitch": NOTE_THIRD, "dur": 0.30},
 
             # Bar 7 (resolution)
-            {"bar": 6, "beat": 0.0, "pitch": NOTE_G4, "dur": 0.35},
-            {"bar": 6, "beat": 2.0, "pitch": NOTE_F4, "dur": 0.30},
-            {"bar": 6, "beat": 3.0, "pitch": NOTE_D4, "dur": 0.60},
+            {"bar": 6, "beat": 0.0, "pitch": NOTE_FOURTH, "dur": 0.35},
+            {"bar": 6, "beat": 2.0, "pitch": NOTE_THIRD, "dur": 0.30},
+            {"bar": 6, "beat": 3.0, "pitch": NOTE_ROOT, "dur": 0.60},
         ]
 
         for evt in melody_events:
@@ -170,30 +193,28 @@ class IntelligentComposer:
             note_audio = sampler.render_tuned_note(
                 pitch=evt["pitch"], base_pitch=60, duration=evt["dur"]
             )
-            # High-pass filter melody to remove low end conflict
             note_audio = butter_highpass_filter(note_audio, cutoff=450.0, sr=self.sr)
 
             end_s = min(start_s + len(note_audio), total_samples)
             track_melody[start_s:end_s] += note_audio[:end_s - start_s] * 0.70
 
         # 5. Bass Progression (Enters at Bar 3, locked to root notes)
-        # Bar 3: D2 | Bar 4: C2 | Bar 5: Bb1 | Bar 6: C2 | Bar 7: D2
         bass_events = [
             # Bar 3
-            {"bar": 2, "beat": 0.0, "pitch": BASS_D, "dur": 0.7},
-            {"bar": 2, "beat": 2.5, "pitch": BASS_D, "dur": 0.4},
+            {"bar": 2, "beat": 0.0, "pitch": BASS_ROOT, "dur": 0.7},
+            {"bar": 2, "beat": 2.5, "pitch": BASS_ROOT, "dur": 0.4},
             # Bar 4
-            {"bar": 3, "beat": 0.0, "pitch": BASS_C, "dur": 0.6},
-            {"bar": 3, "beat": 2.5, "pitch": BASS_A, "dur": 0.5},
+            {"bar": 3, "beat": 0.0, "pitch": BASS_FOURTH, "dur": 0.6},
+            {"bar": 3, "beat": 2.5, "pitch": BASS_FIFTH, "dur": 0.5},
             # Bar 5
-            {"bar": 4, "beat": 0.0, "pitch": BASS_BB, "dur": 0.6},
-            {"bar": 4, "beat": 2.0, "pitch": BASS_C, "dur": 0.5},
+            {"bar": 4, "beat": 0.0, "pitch": BASS_FLAT7, "dur": 0.6},
+            {"bar": 4, "beat": 2.0, "pitch": BASS_FOURTH, "dur": 0.5},
             # Bar 6 (climax)
-            {"bar": 5, "beat": 0.0, "pitch": BASS_D, "dur": 0.7},
-            {"bar": 5, "beat": 2.0, "pitch": BASS_BB, "dur": 0.5},
+            {"bar": 5, "beat": 0.0, "pitch": BASS_ROOT, "dur": 0.7},
+            {"bar": 5, "beat": 2.0, "pitch": BASS_FLAT7, "dur": 0.5},
             # Bar 7
-            {"bar": 6, "beat": 0.0, "pitch": BASS_C, "dur": 0.6},
-            {"bar": 6, "beat": 2.0, "pitch": BASS_D, "dur": 0.8},
+            {"bar": 6, "beat": 0.0, "pitch": BASS_FOURTH, "dur": 0.6},
+            {"bar": 6, "beat": 2.0, "pitch": BASS_ROOT, "dur": 0.8},
         ]
 
         for evt in bass_events:
@@ -208,15 +229,12 @@ class IntelligentComposer:
             bass_audio = sampler.render_bass_hit(
                 pitch=evt["pitch"], base_pitch=60, duration=evt["dur"]
             )
-            # Steep low-pass so it punches in the sub-bass (< 200 Hz)
             bass_audio = butter_lowpass_filter(bass_audio, cutoff=200.0, sr=self.sr)
 
             end_s = min(start_s + len(bass_audio), total_samples)
             track_bass[start_s:end_s] += bass_audio[:end_s - start_s] * 0.95
 
         # 6. Drum Elements:
-        # - Hi-Hats: Enters at Bar 3 on offbeats
-        # - Kicks & Snares: Enter at Bar 5 for the big chorus section
         drum_events = []
 
         # Bars 3 and 4: Offbeat Hi-Hats
@@ -282,6 +300,8 @@ class IntelligentComposer:
             "separated_tracks": adjusted_stems,
             "duration": total_duration,
             "bpm": bpm,
+            "key": key,
+            "scale": scale_type,
             "total_bars": target_bars,
             "seconds_per_bar": seconds_per_bar,
         }
