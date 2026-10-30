@@ -32,6 +32,7 @@ def process_audio(
     musical: bool = False,
     seed: int = None,
     custom_output: str = None,
+    auto_play: bool = False,
 ):
     if not os.path.exists(audio_path):
         print(f"\n[Error] Audio file not found: '{audio_path}'")
@@ -98,7 +99,17 @@ def process_audio(
     os.makedirs(os.path.dirname(os.path.abspath(out_wav_path)), exist_ok=True)
     sf.write(out_wav_path, comp["final_mix"], sr)
 
-    stems_folder = os.path.join(OUTPUT_DIR, f"stems_{file_name}_{tag}_seed_{seed}")
+    # Always also maintain fixed filenames for easy one-click playback:
+    fixed_name_path = os.path.join(OUTPUT_DIR, f"{file_name.replace('-', '_')}_composition.wav")
+    latest_path = os.path.join(OUTPUT_DIR, "latest_composition.wav")
+    try:
+        import shutil
+        shutil.copyfile(out_wav_path, fixed_name_path)
+        shutil.copyfile(out_wav_path, latest_path)
+    except Exception:
+        pass
+
+    stems_folder = os.path.join(OUTPUT_DIR, f"stems_{file_name}")
     os.makedirs(stems_folder, exist_ok=True)
     for stem_name, track_data in comp["separated_tracks"].items():
         stem_file = os.path.join(stems_folder, f"{stem_name}.wav")
@@ -115,8 +126,17 @@ def process_audio(
     print(f"  Tempo:       {comp['bpm']} BPM (Key: {comp['key']} {comp['scale'].title()})")
     print(f"  Duration:    {comp['duration']:.2f}s ({target_bars} bars)")
     print(f"  Master Mix:  {os.path.abspath(out_wav_path)}")
+    print(f"  Fixed File:  {os.path.abspath(fixed_name_path)}")
     print(f"  Stem Tracks: {os.path.abspath(stems_folder)}")
     print("=" * 65)
+
+    # Auto-play if requested or in interactive mode
+    if auto_play:
+        print(f"Opening '{os.path.basename(out_wav_path)}' in your default audio player...")
+        try:
+            os.startfile(out_wav_path)
+        except Exception:
+            pass
 
     return out_wav_path
 
@@ -129,15 +149,18 @@ def main():
     parser.add_argument("--bars", type=int, default=8, help="Number of bars (default: 8)")
     parser.add_argument("--seed", type=int, default=None, help="Random seed for variation (random by default)")
     parser.add_argument("--output", type=str, default=None, help="Custom output path for master WAV")
+    parser.add_argument("--play", action="store_true", help="Automatically open the generated file in default audio player")
 
     args = parser.parse_args()
 
     audio_file = args.file
+    auto_play = args.play
     if not audio_file:
         print("=" * 65)
         print("  CHARLIE — Turn Anything Into Music")
         print("=" * 65)
         audio_file = input("Enter path to audio file (or drag & drop here): ").strip().strip('"').strip("'")
+        auto_play = True  # Auto open in default player when interactive
 
     if not audio_file:
         print("No file specified. Exiting.")
@@ -150,6 +173,7 @@ def main():
         musical=args.musical,
         seed=args.seed,
         custom_output=args.output,
+        auto_play=auto_play,
     )
 
 
