@@ -125,7 +125,22 @@ charlie/
 
 ## 5. Quickstart & Usage
 
-### 1. Run Pipeline Verification Test
+### 1. Universal Composition CLI (Process Any Audio File)
+You can now pass any audio file (`.wav`, `.mp3`, `.flac`) directly:
+```powershell
+.\.venv\Scripts\python.exe compose.py path/to/your_sound.mp3
+```
+Or specify bar length and mood:
+```powershell
+.\.venv\Scripts\python.exe compose.py mug-beat.mp3 --bars 8
+.\.venv\Scripts\python.exe compose.py sample-2.mp3 --bars 8
+```
+Or simply run without arguments to get an interactive prompt:
+```powershell
+.\.venv\Scripts\python.exe compose.py
+```
+
+### 2. Run Pipeline Verification Test
 ```powershell
 .\.venv\Scripts\python.exe test_pipeline.py
 ```
