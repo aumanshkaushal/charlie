@@ -11,22 +11,36 @@ from audio.mixer import mix_tracks
 from audio.midi_generator import get_scale_pitches
 
 
+from .smart_composer import IntelligentComposer
+
+
 class ArrangementEngine:
     """
     Arranges progressive multi-instrument musical compositions
-    where all instruments are sampled directly from the user's input sound.
+    where all instruments are sampled directly from the user's input sound
+    with grid quantization and call-and-response phrasing.
     """
     def __init__(self, sample_rate: int = 22050):
         self.sample_rate = sample_rate
+        self.composer = IntelligentComposer(sample_rate=sample_rate)
 
     def create_arrangement(
         self,
         original_waveform: np.ndarray,
         predictions: dict,
-        target_duration: float = 16.0,
+        target_duration: float = 14.0,
         mood: str = "Chill",
         selected_instruments: list[str] = None,
     ) -> dict:
+        bpm = predictions.get("detected_bpm", 136.0)
+        seconds_per_bar = (60.0 / bpm) * 4.0
+        target_bars = max(int(round(target_duration / seconds_per_bar)), 4)
+
+        return self.composer.compose(
+            waveform=original_waveform,
+            predictions=predictions,
+            target_bars=target_bars,
+        )
         """
         Creates a complete multi-bar composition sampled directly from the input audio.
         """
