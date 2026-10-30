@@ -1,4 +1,4 @@
-"""Training script for the Charlie Music Adapter."""
+"""Training script for Charlie Multi-Dataset Music Adapter (ESC-50 + Groove + MAESTRO)."""
 import os
 import time
 import json
@@ -6,11 +6,13 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
 from .adapter import CharlieMusicAdapter
-from .dataset import CharliePairedDataset
+from .dataset import CharlieFullMultiDataset
 
 
 def train_adapter(
-    dataset_dir: str = "dataset/ESC-50-master",
+    esc50_dir: str = "dataset/ESC-50-master",
+    groove_dir: str = "dataset/groove",
+    maestro_dir: str = "dataset/maestro-v3.0.0",
     output_checkpoint: str = "checkpoints/charlie_adapter.pt",
     epochs: int = 15,
     batch_size: int = 16,
@@ -18,12 +20,20 @@ def train_adapter(
     max_samples: int = 400,
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
 ):
-    print(f"=== Starting Charlie Music Adapter Training on {device} ===")
+    print(f"=== Training Charlie Adapter on {device.upper()} with All 3 Datasets ===")
+    print(f"  1. Environmental Audio: {esc50_dir}")
+    print(f"  2. Drum Groove MIDI:    {groove_dir}")
+    print(f"  3. Piano Harmony MIDI:  {maestro_dir}")
     os.makedirs(os.path.dirname(os.path.abspath(output_checkpoint)), exist_ok=True)
 
-    # 1. Prepare Dataset
-    print(f"Loading paired environmental-to-music dataset from {dataset_dir} (up to {max_samples} samples)...")
-    full_dataset = CharliePairedDataset(esc50_dir=dataset_dir, max_samples=max_samples, cache_data=True)
+    # 1. Load multi-dataset
+    full_dataset = CharlieFullMultiDataset(
+        esc50_dir=esc50_dir,
+        groove_dir=groove_dir,
+        maestro_dir=maestro_dir,
+        max_samples=max_samples,
+        cache_data=True,
+    )
     total_len = len(full_dataset)
     train_len = int(total_len * 0.85)
     val_len = total_len - train_len
@@ -37,12 +47,12 @@ def train_adapter(
     train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, drop_last=False)
     val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False)
 
-    # 2. Initialize Model
+    # 2. Model
     model = CharlieMusicAdapter().to(device)
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Model initialized: CharlieMusicAdapter with {total_params:,} trainable parameters.")
+    print(f"CharlieMusicAdapter initialized with {total_params:,} trainable parameters.")
 
-    # 3. Loss Functions & Optimizer
+    # 3. Loss & Optimizer
     criterion_bce = nn.BCELoss()
     criterion_ce = nn.CrossEntropyLoss()
     criterion_mse = nn.MSELoss()
@@ -50,7 +60,7 @@ def train_adapter(
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
-    history = {"train_loss": [], "val_loss": [], "loss_breakdown": []}
+    history = {"train_loss": [], "val_loss": []}
     best_val_loss = float("inf")
     start_time = time.time()
 
@@ -58,8 +68,6 @@ def train_adapter(
     for epoch in range(1, epochs + 1):
         model.train()
         running_loss = 0.0
-        running_rhythm_loss = 0.0
-        running_harmony_loss = 0.0
 
         for batch in train_loader:
             waveforms = batch["waveform"].to(device)
@@ -70,10 +78,8 @@ def train_adapter(
             target_mood = batch["target_mood"].to(device)
 
             optimizer.zero_grad()
-
             preds = model(waveforms)
 
-            # Multi-task losses
             l_rhythm = criterion_bce(preds["rhythm"], target_rhythm)
             l_harmony = criterion_ce(preds["harmony_logits"], target_harmony)
             l_instruments = criterion_bce(preds["instruments"], target_instruments)
@@ -93,8 +99,6 @@ def train_adapter(
             optimizer.step()
 
             running_loss += total_loss.item() * len(waveforms)
-            running_rhythm_loss += l_rhythm.item() * len(waveforms)
-            running_harmony_loss += l_harmony.item() * len(waveforms)
 
         scheduler.step()
         epoch_train_loss = running_loss / train_len
@@ -129,49 +133,28 @@ def train_adapter(
                 val_loss += total_loss.item() * len(waveforms)
 
         epoch_val_loss = val_loss / max(val_len, 1)
-
         history["train_loss"].append(round(epoch_train_loss, 4))
         history["val_loss"].append(round(epoch_val_loss, 4))
 
-        print(
-            f"Epoch [{epoch:02d}/{epochs:02d}] "
-            f"Train Loss: {epoch_train_loss:.4f} | "
-            f"Val Loss: {epoch_val_loss:.4f} | "
-            f"LR: {scheduler.get_last_lr()[0]:.6f}"
-        )
+        print(f"Epoch [{epoch:02d}/{epochs:02d}] Train: {epoch_train_loss:.4f} | Val: {epoch_val_loss:.4f}")
 
-        # Save best model checkpoint
         if epoch_val_loss < best_val_loss:
             best_val_loss = epoch_val_loss
             torch.save(
                 {
                     "epoch": epoch,
                     "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
                     "val_loss": best_val_loss,
                     "history": history,
+                    "datasets": ["ESC-50", "Groove", "MAESTRO"],
                     "total_params": total_params,
                 },
                 output_checkpoint,
             )
-            print(f"  --> Saved new best checkpoint to {output_checkpoint}")
+            print(f"  --> Saved multi-dataset checkpoint to {output_checkpoint}")
 
     elapsed = time.time() - start_time
-    print(f"\nTraining completed in {elapsed:.2f}s. Best Val Loss: {best_val_loss:.4f}")
-
-    # Save training history summary JSON
-    summary_path = os.path.splitext(output_checkpoint)[0] + "_history.json"
-    with open(summary_path, "w") as f:
-        json.dump(
-            {
-                "best_val_loss": best_val_loss,
-                "history": history,
-                "training_time_sec": round(elapsed, 2),
-                "device": device,
-            },
-            f,
-            indent=2,
-        )
+    print(f"\nTraining completed in {elapsed:.2f}s across ESC-50, Groove, and MAESTRO! Best Val Loss: {best_val_loss:.4f}")
 
     return model, history
 
