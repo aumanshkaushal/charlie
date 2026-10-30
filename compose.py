@@ -1,14 +1,13 @@
 """CHARLIE — Universal Sound-to-Music Composition CLI.
-Transforms any environmental recording (mug, knock, clap) into completely distinct genres:
-  --genre lofi       (84 BPM, swung pocket, jazzy keys, warm sub-bass)
-  --genre house      (126 BPM, 4-on-the-floor club kick, offbeat hats, energetic stabs)
-  --genre trap       (140 BPM, heavy 808 sub, half-time snare, rolling triplet hats)
-  --genre synthwave  (115 BPM, driving 8th-note bass, retro arpeggiator)
-  --genre afrobeat   (112 BPM, polyrhythmic syncopation, log bass bounce)
-  --genre ambient    (72 BPM, slow spatial bells, ethereal sub drone)
+Transforms any environmental recording (mug, knock, clap) into rich musical tracks:
+  --musical          Enable rich polyphonic 7th/9th chords, studio space, and melodic counterpoint
+  --genre <name>     Target genre: lofi, rnb, house, trap, synthwave, afrobeat, ambient
+  --seed <int>       Reproducible variation seed (random by default)
+  --bars <int>       Number of musical bars (default: 8)
 
 Usage:
-    python compose.py <path-to-audio-file> [--genre house] [--bars 8] [--seed 42]
+    python compose.py mug-beat.mp3 --musical
+    python compose.py sample-2.mp3 --musical --bars 8
 """
 import os
 import sys
@@ -30,6 +29,7 @@ def process_audio(
     audio_path: str,
     target_bars: int = 8,
     genre: str = None,
+    musical: bool = False,
     seed: int = None,
     custom_output: str = None,
 ):
@@ -43,9 +43,12 @@ def process_audio(
     file_name = os.path.splitext(os.path.basename(audio_path))[0]
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+    mode_label = "LUSH MUSICAL MODE (Polyphonic Chords + Space)" if musical else "Standard Sampler Mode"
+
     print("=" * 65)
     print(f"  CHARLIE — Turn Anything Into Music: '{os.path.basename(audio_path)}'")
-    print(f"  Active Seed: {seed} | Requested Genre: {genre or 'Auto-Selected'}")
+    print(f"  Mode: {mode_label}")
+    print(f"  Active Seed: {seed} | Genre: {genre or 'Auto-Generative'}")
     print("=" * 65)
 
     # 1. Load Audio
@@ -68,7 +71,7 @@ def process_audio(
     preds = engine.predict(waveform, sr=sr)
 
     # 4. Generative Multi-Genre Composition
-    print(f"\n[4/5] Composing {target_bars} bars in {genre or 'generative'} style...")
+    print(f"\n[4/5] Composing {target_bars} bars with seed {seed}...")
     composer = IntelligentComposer(sample_rate=sr)
     comp = composer.compose(
         waveform=waveform,
@@ -76,22 +79,26 @@ def process_audio(
         target_bars=target_bars,
         seed=seed,
         genre=genre,
+        musical=musical,
     )
 
     print(f"      -> Genre Selected:    {comp['genre'].upper()} — {comp['genre_desc']}")
     print(f"      -> Composition Tempo: {comp['bpm']} BPM (Key: {comp['key']} {comp['scale']})")
+    if musical:
+        print(f"      -> Harmony:           Polyphonic 7th Chords + Studio Spatial Reverb")
 
     # 5. Save Outputs (Master Mix + Stems)
     print(f"\n[5/5] Saving master mix and stem tracks...")
+    tag = f"musical_{comp['genre']}" if musical else comp['genre']
     if custom_output:
         out_wav_path = custom_output
     else:
-        out_wav_path = os.path.join(OUTPUT_DIR, f"{file_name}_{comp['genre']}_seed_{seed}.wav")
+        out_wav_path = os.path.join(OUTPUT_DIR, f"{file_name}_{tag}_seed_{seed}.wav")
 
     os.makedirs(os.path.dirname(os.path.abspath(out_wav_path)), exist_ok=True)
     sf.write(out_wav_path, comp["final_mix"], sr)
 
-    stems_folder = os.path.join(OUTPUT_DIR, f"stems_{file_name}_{comp['genre']}_seed_{seed}")
+    stems_folder = os.path.join(OUTPUT_DIR, f"stems_{file_name}_{tag}_seed_{seed}")
     os.makedirs(stems_folder, exist_ok=True)
     for stem_name, track_data in comp["separated_tracks"].items():
         stem_file = os.path.join(stems_folder, f"{stem_name}.wav")
@@ -103,9 +110,9 @@ def process_audio(
 
     print("\n" + "=" * 65)
     print("  GENERATION COMPLETE!")
+    print(f"  Mode:        {mode_label}")
     print(f"  Genre:       {comp['genre'].upper()}")
-    print(f"  Tempo:       {comp['bpm']} BPM")
-    print(f"  Key:         {comp['key']} {comp['scale'].title()}")
+    print(f"  Tempo:       {comp['bpm']} BPM (Key: {comp['key']} {comp['scale'].title()})")
     print(f"  Duration:    {comp['duration']:.2f}s ({target_bars} bars)")
     print(f"  Master Mix:  {os.path.abspath(out_wav_path)}")
     print(f"  Stem Tracks: {os.path.abspath(stems_folder)}")
@@ -117,9 +124,10 @@ def process_audio(
 def main():
     parser = argparse.ArgumentParser(description="Charlie Multi-Genre Sound-to-Music System")
     parser.add_argument("file", nargs="?", default=None, help="Path to input audio file")
-    parser.add_argument("--genre", type=str, choices=GENRES, default=None, help="Target genre: lofi, house, trap, synthwave, afrobeat, ambient")
+    parser.add_argument("--musical", action="store_true", help="Enable rich polyphonic 7th chords, studio space, and melodic counterpoint")
+    parser.add_argument("--genre", type=str, choices=GENRES, default=None, help="Target genre: lofi, rnb, house, trap, synthwave, afrobeat, ambient")
     parser.add_argument("--bars", type=int, default=8, help="Number of bars (default: 8)")
-    parser.add_argument("--seed", type=int, default=None, help="Random seed for variation")
+    parser.add_argument("--seed", type=int, default=None, help="Random seed for variation (random by default)")
     parser.add_argument("--output", type=str, default=None, help="Custom output path for master WAV")
 
     args = parser.parse_args()
@@ -139,6 +147,7 @@ def main():
         audio_path=audio_file,
         target_bars=args.bars,
         genre=args.genre,
+        musical=args.musical,
         seed=args.seed,
         custom_output=args.output,
     )
