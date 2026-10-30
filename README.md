@@ -125,7 +125,15 @@ charlie/
 
 ## 5. Quickstart & Usage
 
-### 1. Universal Composition CLI (Process Any Audio File)
+### 1. Launch Next.js Web App (Wireframe UI)
+To launch the interactive Excalidraw-style web interface:
+```powershell
+.\start_web.bat
+# Or: npm run dev --prefix web
+```
+Then open: **`http://localhost:3000`** in your browser.
+
+### 2. Universal Composition CLI (Process Any Audio File)
 You can now pass any audio file (`.wav`, `.mp3`, `.flac`) directly:
 ```powershell
 .\.venv\Scripts\python.exe compose.py path/to/your_sound.mp3
