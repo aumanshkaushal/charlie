@@ -160,7 +160,6 @@ def main():
         print("  CHARLIE — Turn Anything Into Music")
         print("=" * 65)
         audio_file = input("Enter path to audio file (or drag & drop here): ").strip().strip('"').strip("'")
-        auto_play = True  # Auto open in default player when interactive
 
     if not audio_file:
         print("No file specified. Exiting.")
