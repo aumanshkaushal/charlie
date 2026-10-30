@@ -6,45 +6,47 @@ interface Props {
   height?: number;
   isEmpty?: boolean;
   emptyText?: string;
+  isMini?: boolean;
 }
 
-// Magma / Inferno Colormap: 0.0 (dark purple) -> 0.5 (magenta/orange) -> 1.0 (bright yellow/white)
-function getColor(val: number): string {
+// Real Heatmap Palette: 0.0 (near black) -> deep purple -> crimson -> neon orange -> bright yellow/white
+function getAudioColor(val: number): string {
   const v = Math.max(0, Math.min(1, val));
-  if (v < 0.02) return '#0d0d12';
-  if (v < 0.25) {
-    const t = v / 0.25;
-    const r = Math.floor(20 + t * 90);
-    const g = Math.floor(10 + t * 20);
-    const b = Math.floor(50 + t * 80);
+  if (v < 0.05) return '#090a10';
+  if (v < 0.28) {
+    const t = v / 0.28;
+    const r = Math.floor(18 + t * 85);
+    const g = Math.floor(8 + t * 15);
+    const b = Math.floor(45 + t * 90);
     return `rgb(${r},${g},${b})`;
   } else if (v < 0.6) {
-    const t = (v - 0.25) / 0.35;
-    const r = Math.floor(110 + t * 115);
-    const g = Math.floor(30 + t * 45);
-    const b = Math.floor(130 - t * 50);
+    const t = (v - 0.28) / 0.32;
+    const r = Math.floor(103 + t * 122);
+    const g = Math.floor(23 + t * 47);
+    const b = Math.floor(135 - t * 65);
     return `rgb(${r},${g},${b})`;
   } else if (v < 0.85) {
     const t = (v - 0.6) / 0.25;
     const r = Math.floor(225 + t * 25);
-    const g = Math.floor(75 + t * 110);
-    const b = Math.floor(80 - t * 40);
+    const g = Math.floor(70 + t * 115);
+    const b = Math.floor(70 - t * 45);
     return `rgb(${r},${g},${b})`;
   } else {
     const t = (v - 0.85) / 0.15;
     const r = 250;
     const g = Math.floor(185 + t * 65);
-    const b = Math.floor(40 + t * 180);
+    const b = Math.floor(25 + t * 190);
     return `rgb(${r},${g},${b})`;
   }
 }
 
 export default function SpectrogramCanvas({
   matrix,
-  width = 500,
+  width = 600,
   height = 240,
   isEmpty = false,
-  emptyText = 'Empty spectrogram',
+  emptyText = 'Empty Spectrogram',
+  isMini = false,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
@@ -57,28 +59,30 @@ export default function SpectrogramCanvas({
     ctx.clearRect(0, 0, width, height);
 
     if (isEmpty || !matrix || matrix.length === 0) {
-      // Draw minimal dark empty container with sketch grid lines
-      ctx.fillStyle = '#111116';
+      // Neural grid placeholder
+      ctx.fillStyle = '#0b0c13';
       ctx.fillRect(0, 0, width, height);
 
-      // Faint grid lines
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.04)';
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
       ctx.lineWidth = 1;
-      for (let x = 0; x < width; x += 40) {
+      const stepX = isMini ? 25 : 50;
+      const stepY = isMini ? 15 : 30;
+
+      for (let x = 0; x < width; x += stepX) {
         ctx.beginPath();
         ctx.moveTo(x, 0);
         ctx.lineTo(x, height);
         ctx.stroke();
       }
-      for (let y = 0; y < height; y += 30) {
+      for (let y = 0; y < height; y += stepY) {
         ctx.beginPath();
         ctx.moveTo(0, y);
         ctx.lineTo(width, y);
         ctx.stroke();
       }
 
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
-      ctx.font = '24px Gaegu, sans-serif';
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.35)';
+      ctx.font = isMini ? 'italic 12px serif' : 'italic 18px serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText(emptyText, width / 2, height / 2);
@@ -92,26 +96,25 @@ export default function SpectrogramCanvas({
     const cellW = width / numTimeFrames;
     const cellH = height / numFreqBins;
 
-    // Draw bottom-up: low frequencies at the bottom, high at top
+    // Draw real STFT spectrogram bottom-up
     for (let f = 0; f < numFreqBins; f++) {
       const row = matrix[f];
-      // Invert row index so frequency 0 is at bottom
       const y = height - (f + 1) * cellH;
 
       for (let t = 0; t < numTimeFrames; t++) {
         const val = row[t] || 0;
-        ctx.fillStyle = getColor(val);
-        ctx.fillRect(t * cellW, y, cellW + 0.6, cellH + 0.6);
+        ctx.fillStyle = getAudioColor(val);
+        ctx.fillRect(t * cellW, y, cellW + 0.5, cellH + 0.5);
       }
     }
-  }, [matrix, width, height, isEmpty, emptyText]);
+  }, [matrix, width, height, isEmpty, emptyText, isMini]);
 
   return (
     <canvas
       ref={canvasRef}
       width={width}
       height={height}
-      className="w-full h-full rounded-xl object-cover"
+      className="w-full h-full rounded-lg object-cover"
     />
   );
 }

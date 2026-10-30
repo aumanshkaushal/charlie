@@ -22,6 +22,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
   const pyPath = path.join(charlieRoot, '.venv', 'Scripts', 'python.exe');
   const composeScript = path.join(charlieRoot, 'compose.py');
+  const analyzerScript = path.join(charlieRoot, 'analyze_cli.py');
 
   const targetSeed = seed ? parseInt(String(seed), 10) : Math.floor(1000 + Math.random() * 900000);
   const targetBars = bars ? parseInt(String(bars), 10) : 8;
@@ -33,7 +34,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     '--seed', String(targetSeed),
   ];
 
-  if (genre) {
+  if (genre && genre !== 'random' && genre !== 'auto') {
     args.push('--genre', String(genre).toLowerCase());
   }
 
@@ -41,40 +42,60 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     args.push('--musical');
   }
 
-  execFile(pyPath, args, { cwd: charlieRoot }, (err, stdout, stderr) => {
-    if (err) {
-      console.error('Compose error:', stderr || err.message);
-      return res.status(500).json({ error: 'Composition failed: ' + (stderr || err.message) });
-    }
-
-    // Parse the output files
-    const fileBase = path.basename(filePath, path.extname(filePath));
-    const stemsDir = path.join(charlieRoot, 'outputs', 'generated', `stems_${fileBase}`);
-
-    // Stems
-    const stems: Record<string, string> = {};
-    const stemNames = ['original', 'melody', 'drums', 'bass', 'chords'];
-
-    for (const name of stemNames) {
-      const stemFile = path.join(stemsDir, `${name}.wav`);
-      if (fs.existsSync(stemFile)) {
-        const rel = path.relative(charlieRoot, stemFile);
-        stems[name] = `/api/audio?file=${encodeURIComponent(rel)}`;
+  return new Promise<void>((resolve) => {
+    execFile(pyPath, args, { cwd: charlieRoot }, (err, stdout, stderr) => {
+      if (err) {
+        console.error('Compose error:', stderr || err.message);
+        res.status(500).json({ error: 'Composition failed: ' + (stderr || err.message) });
+        return resolve();
       }
-    }
 
-    // Master file
-    const latestMaster = path.join(charlieRoot, 'outputs', 'generated', 'latest_composition.wav');
-    const masterRel = path.relative(charlieRoot, latestMaster);
+      // Locate stems directory
+      const fileBase = path.basename(filePath, path.extname(filePath));
+      const stemsDir = path.join(charlieRoot, 'outputs', 'generated', `stems_${fileBase}`);
 
-    return res.status(200).json({
-      success: true,
-      seed: targetSeed,
-      genre: genre || 'auto',
-      musical: Boolean(musical),
-      masterUrl: `/api/audio?file=${encodeURIComponent(masterRel)}`,
-      stems,
-      outputLog: stdout,
+      // Call analyzer on stemsDir to get real numerical STFT spectrograms for all stems
+      execFile(pyPath, [analyzerScript, stemsDir], (stemErr, stemStdout) => {
+        let stemsSpectrograms: Record<string, number[][]> = {};
+        try {
+          if (stemStdout) {
+            const parsed = JSON.parse(stemStdout.trim());
+            stemsSpectrograms = parsed.stems_spectrograms || {};
+          }
+        } catch (parseE) {
+          console.error('Failed to parse stem spectrograms:', parseE);
+        }
+
+        // Collect audio URLs & real spectrograms for each stem
+        const stems: Record<string, { audioUrl: string; spectrogram: number[][] }> = {};
+        const stemNames = ['original', 'melody', 'drums', 'bass', 'chords'];
+
+        for (const name of stemNames) {
+          const stemFile = path.join(stemsDir, `${name}.wav`);
+          if (fs.existsSync(stemFile)) {
+            const rel = path.relative(charlieRoot, stemFile);
+            stems[name] = {
+              audioUrl: `/api/audio?file=${encodeURIComponent(rel)}`,
+              spectrogram: stemsSpectrograms[name] || [],
+            };
+          }
+        }
+
+        // Master audio URL
+        const latestMaster = path.join(charlieRoot, 'outputs', 'generated', 'latest_composition.wav');
+        const masterRel = path.relative(charlieRoot, latestMaster);
+
+        res.status(200).json({
+          success: true,
+          seed: targetSeed,
+          genre: genre || 'auto',
+          musical: Boolean(musical),
+          masterUrl: `/api/audio?file=${encodeURIComponent(masterRel)}`,
+          stems,
+          outputLog: stdout,
+        });
+        resolve();
+      });
     });
   });
 }

@@ -27,46 +27,51 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     maxFileSize: 25 * 1024 * 1024,
   });
 
-  form.parse(req, async (err, fields, files) => {
-    if (err) {
-      return res.status(500).json({ error: 'Upload failed: ' + err.message });
-    }
-
-    const file = Array.isArray(files.file) ? files.file[0] : files.file;
-    if (!file) {
-      return res.status(400).json({ error: 'No file uploaded' });
-    }
-
-    const originalName = file.originalFilename || 'upload.wav';
-    const filePath = file.filepath;
-    const relPath = path.relative(charlieRoot, filePath);
-
-    // Analyze using python analyze_cli.py
-    const pyPath = path.join(charlieRoot, '.venv', 'Scripts', 'python.exe');
-    const scriptPath = path.join(charlieRoot, 'analyze_cli.py');
-
-    execFile(pyPath, [scriptPath, filePath], (pyErr, stdout, stderr) => {
-      let analysis = {
-        bpm: 120,
-        key: 'C',
-        duration: 0,
-        spectrogram: [],
-      };
-
-      try {
-        if (stdout) {
-          analysis = JSON.parse(stdout.trim());
-        }
-      } catch (parseErr) {
-        console.error('Failed to parse analyzer JSON:', stdout);
+  return new Promise<void>((resolve) => {
+    form.parse(req, (err, fields, files) => {
+      if (err) {
+        res.status(500).json({ error: 'Upload failed: ' + err.message });
+        return resolve();
       }
 
-      return res.status(200).json({
-        success: true,
-        fileName: originalName,
-        filePath: relPath,
-        audioUrl: `/api/audio?file=${encodeURIComponent(relPath)}`,
-        analysis,
+      const file = Array.isArray(files.file) ? files.file[0] : files.file;
+      if (!file) {
+        res.status(400).json({ error: 'No file uploaded' });
+        return resolve();
+      }
+
+      const originalName = file.originalFilename || 'upload.wav';
+      const filePath = file.filepath;
+      const relPath = path.relative(charlieRoot, filePath);
+
+      // Analyze using python analyze_cli.py
+      const pyPath = path.join(charlieRoot, '.venv', 'Scripts', 'python.exe');
+      const scriptPath = path.join(charlieRoot, 'analyze_cli.py');
+
+      execFile(pyPath, [scriptPath, filePath], (pyErr, stdout, stderr) => {
+        let analysis = {
+          bpm: 120,
+          key: 'C',
+          duration: 0,
+          spectrogram: [],
+        };
+
+        try {
+          if (stdout) {
+            analysis = JSON.parse(stdout.trim());
+          }
+        } catch (parseErr) {
+          console.error('Failed to parse analyzer JSON:', stdout);
+        }
+
+        res.status(200).json({
+          success: true,
+          fileName: originalName,
+          filePath: relPath,
+          audioUrl: `/api/audio?file=${encodeURIComponent(relPath)}`,
+          analysis,
+        });
+        resolve();
       });
     });
   });

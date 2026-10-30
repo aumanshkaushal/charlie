@@ -2,18 +2,23 @@ import React, { useState, useRef, useEffect } from 'react';
 import Head from 'next/head';
 import SpectrogramCanvas from '@/components/SpectrogramCanvas';
 
-const GENRES = ['lofi', 'house', 'trap', 'synthwave', 'afrobeat', 'ambient', 'rnb'];
+const GENRES = ['random', 'lofi', 'rnb', 'house', 'trap', 'synthwave', 'afrobeat', 'ambient'];
+
+interface StemData {
+  audioUrl: string;
+  spectrogram: number[][];
+}
 
 export default function Home() {
-  const [file, setFile] = useState<File | null>(null);
   const [fileName, setFileName] = useState<string>('');
   const [filePath, setFilePath] = useState<string>('');
   const [audioUrl, setAudioUrl] = useState<string>('');
   const [analysis, setAnalysis] = useState<any>(null);
+  const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
 
-  // Config options
+  // Neural config
   const [musical, setMusical] = useState<boolean>(true);
-  const [genre, setGenre] = useState<string>('lofi');
+  const [genre, setGenre] = useState<string>('random');
   const [seed, setSeed] = useState<number>(() => Math.floor(1000 + Math.random() * 900000));
   const [bars, setBars] = useState<number>(8);
 
@@ -21,7 +26,7 @@ export default function Home() {
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
   const [generationDone, setGenerationDone] = useState<boolean>(false);
   const [masterUrl, setMasterUrl] = useState<string>('');
-  const [stems, setStems] = useState<Record<string, string>>({});
+  const [stems, setStems] = useState<Record<string, StemData>>({});
 
   // Audio Playback states
   const [playingTrack, setPlayingTrack] = useState<string | null>(null);
@@ -44,11 +49,11 @@ export default function Home() {
     }
   };
 
-  // Upload handler
+  // Upload handler with real analysis
   const handleUpload = async (selectedFile: File) => {
-    setFile(selectedFile);
     setFileName(selectedFile.name);
     setGenerationDone(false);
+    setIsAnalyzing(true);
 
     const formData = new FormData();
     formData.append('file', selectedFile);
@@ -66,33 +71,31 @@ export default function Home() {
       }
     } catch (err) {
       console.error('Upload error:', err);
+    } finally {
+      setIsAnalyzing(false);
     }
   };
 
-  // Quick load existing demo files
-  const loadPreset = async (presetPath: string) => {
-    setFileName(presetPath);
-    setFilePath(presetPath);
-    setAudioUrl(`/api/audio?file=${encodeURIComponent(presetPath)}`);
+  // Load preset with REAL STFT analysis from backend
+  const loadPreset = async (presetFile: string) => {
+    setFileName(presetFile);
+    setFilePath(presetFile);
+    setAudioUrl(`/api/audio?file=${encodeURIComponent(presetFile)}`);
     setGenerationDone(false);
+    setIsAnalyzing(true);
 
-    // Fetch analysis
     try {
-      const res = await fetch(`/api/audio?file=${encodeURIComponent(presetPath)}`);
-      // Trigger analyze via upload API or dummy
-      setAnalysis({
-        bpm: 136,
-        key: presetPath.includes('mug') ? 'D' : 'B',
-        spectrogram: Array.from({ length: 32 }, () =>
-          Array.from({ length: 64 }, () => Math.random() * 0.8)
-        ),
-      });
+      const res = await fetch(`/api/analyze?file=${encodeURIComponent(presetFile)}`);
+      const data = await res.json();
+      setAnalysis(data);
     } catch (e) {
-      console.error(e);
+      console.error('Analysis error:', e);
+    } finally {
+      setIsAnalyzing(false);
     }
   };
 
-  // Generate composition
+  // Generate composition & fetch real stem spectrograms
   const handleGenerate = async () => {
     if (!filePath) return;
     setIsGenerating(true);
@@ -103,7 +106,7 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           filePath,
-          genre,
+          genre: genre === 'random' ? undefined : genre,
           musical,
           seed,
           bars,
@@ -124,168 +127,185 @@ export default function Home() {
   };
 
   return (
-    <div className="min-h-screen bg-[#0d0d12] text-white p-6 md:p-10 flex flex-col font-['Gaegu']">
+    <div className="min-h-screen bg-[#08080d] text-slate-100 p-6 md:p-10 flex flex-col font-serif selection:bg-cyan-500/30">
       <Head>
         <title>hey charlie</title>
-        <meta name="description" content="Turn anything into music" />
+        <meta name="description" content="AI Sound-to-Music Neural Generator" />
         <link rel="icon" href="data:," />
       </Head>
 
-      {/* Header - Minimal, no logos, funky handwriting squiggly font */}
-      <header className="mb-8 flex items-baseline justify-between border-b border-white/10 pb-4">
+      {/* Header: Funky squiggly title, strictly serif everywhere else */}
+      <header className="mb-8 flex flex-col md:flex-row md:items-end justify-between border-b border-white/10 pb-5 gap-4">
         <div>
-          <h1 className="text-5xl md:text-6xl font-bold tracking-wider text-white">
+          {/* Strictly only 'hey charlie' has funky handwriting squiggly font */}
+          <h1 className="font-funky text-6xl md:text-7xl font-bold tracking-wider text-white select-none">
             hey charlie
           </h1>
-          <p className="text-xl text-white/50 mt-1">turn anything into music</p>
+          <p className="text-lg italic text-slate-400 mt-1 font-serif">
+            neural audio architecture & environmental sound resynthesis
+          </p>
         </div>
 
-        {/* Quick sample pickers */}
-        <div className="flex items-center gap-3 text-lg">
-          <span className="text-white/40">try sample:</span>
+        {/* Neural Network Presets */}
+        <div className="flex items-center gap-3 text-base">
+          <span className="text-slate-400 italic">Input Presets:</span>
           <button
             onClick={() => loadPreset('mug-beat.mp3')}
-            className="px-3 py-1 sketch-border text-sm hover:bg-white/10 transition cursor-pointer"
+            className="px-3 py-1.5 neural-node text-sm hover:border-cyan-400 text-slate-200 transition cursor-pointer"
           >
             mug-beat.mp3
           </button>
           <button
             onClick={() => loadPreset('sample-2.mp3')}
-            className="px-3 py-1 sketch-border text-sm hover:bg-white/10 transition cursor-pointer"
+            className="px-3 py-1.5 neural-node text-sm hover:border-cyan-400 text-slate-200 transition cursor-pointer"
           >
             sample-2.mp3
           </button>
         </div>
       </header>
 
-      {/* Main Workspace Layout */}
+      {/* WORKSPACE */}
       {!filePath ? (
-        /* STATE 1: Empty / Upload state (Left of Excalidraw Sketch) */
+        /* STATE 1: Empty / Input Node (Left of wireframe sketch) */
         <div className="grid grid-cols-1 md:grid-cols-2 gap-8 my-auto max-w-5xl mx-auto w-full">
-          {/* Box 1: Upload MP3 */}
-          <label className="sketch-border bg-[#13131a] p-12 flex flex-col items-center justify-center min-h-[380px] cursor-pointer hover:border-white transition group">
+          {/* Node 1: Upload MP3 */}
+          <label className="neural-node p-12 flex flex-col items-center justify-center min-h-[360px] cursor-pointer hover:border-cyan-400/80 transition group relative overflow-hidden">
+            <div className="absolute top-3 left-4 text-xs tracking-widest uppercase text-cyan-400/70 font-mono">
+              [LAYER 0 : AUDIO INPUT]
+            </div>
             <input
               type="file"
               accept="audio/*"
               className="hidden"
               onChange={(e) => e.target.files?.[0] && handleUpload(e.target.files[0])}
             />
-            <div className="text-4xl font-bold mb-4 group-hover:scale-105 transition">
-              Upload MP3
+            <div className="w-16 h-16 rounded-full border border-cyan-400/40 flex items-center justify-center text-3xl mb-4 group-hover:scale-110 transition bg-cyan-950/20 text-cyan-300">
+              ⭳
             </div>
-            <p className="text-xl text-white/50 text-center">
-              drop your mug beat, knock, clap, or humming sound here
+            <div className="text-3xl font-bold mb-2 text-white">Upload MP3</div>
+            <p className="text-base text-slate-400 text-center italic max-w-sm">
+              feed environmental audio (glass tap, knock, clap, hum) into the neural network
             </p>
-            <div className="mt-8 px-5 py-2 sketch-border text-lg bg-white/5 hover:bg-white/10">
-              browse file
-            </div>
           </label>
 
-          {/* Box 2: Empty Spectrogram */}
-          <div className="sketch-border bg-[#13131a] p-6 flex flex-col justify-between min-h-[380px] relative">
-            <div className="w-full h-[280px]">
-              <SpectrogramCanvas isEmpty emptyText="Empty spectrogram" />
+          {/* Node 2: Empty Spectrogram */}
+          <div className="neural-node p-5 flex flex-col justify-between min-h-[360px] relative">
+            <div className="flex items-center justify-between text-xs tracking-widest uppercase text-slate-400/70 font-mono mb-2">
+              <span>[STFT SPECTROGRAM MATRIX]</span>
+              <span className="text-cyan-400">22,050 Hz</span>
             </div>
-            {/* Play button icon in bottom right */}
-            <div className="flex justify-end mt-2">
-              <div className="w-12 h-12 sketch-border flex items-center justify-center text-xl text-white/40 rounded-full">
+            <div className="w-full h-[260px] rounded-lg overflow-hidden border border-white/5">
+              <SpectrogramCanvas isEmpty emptyText="Empty Spectrogram (Upload sound)" />
+            </div>
+            <div className="flex justify-end mt-3">
+              <div className="w-10 h-10 rounded-full border border-white/20 flex items-center justify-center text-sm text-slate-400">
                 ▶
               </div>
             </div>
           </div>
         </div>
       ) : (
-        /* STATE 2: Uploaded & Active Workspace (Right of Excalidraw Sketch) */
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start max-w-7xl mx-auto w-full">
-          {/* LEFT COLUMN: Main Spectrogram + File Info + Config (5 cols) */}
+        /* STATE 2: ACTIVE NEURAL NETWORK PIPELINE (Right of wireframe sketch) */
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start max-w-7xl mx-auto w-full relative">
+          
+          {/* LEFT COLUMN: Input Node + Real STFT + Neural Config (5 cols) */}
           <div className="lg:col-span-5 flex flex-col gap-6">
-            {/* Main Spectrogram Box */}
-            <div className="sketch-border bg-[#13131a] p-4 relative">
-              <div className="h-[220px] w-full overflow-hidden rounded-lg">
-                <SpectrogramCanvas
-                  matrix={analysis?.spectrogram}
-                  isEmpty={!analysis?.spectrogram}
-                />
-              </div>
-              {/* File name */}
-              <div className="mt-3 flex items-center justify-between text-xl font-bold">
-                <span className="truncate">{fileName}</span>
+            
+            {/* Input Node Card */}
+            <div className="neural-node p-5 relative">
+              <div className="flex items-center justify-between text-xs tracking-widest uppercase text-cyan-400 font-mono mb-3">
+                <span>[INPUT NODE: {fileName}]</span>
                 {analysis?.bpm && (
-                  <span className="text-sm px-2 py-0.5 sketch-border bg-white/5">
+                  <span className="text-emerald-400">
                     {analysis.bpm} BPM • Key: {analysis.key || 'D'}
                   </span>
                 )}
               </div>
-            </div>
 
-            {/* Mini Player Bar */}
-            <div className="sketch-border bg-[#13131a] px-5 py-3 flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <div className="h-6 w-32 bg-gradient-to-r from-purple-800 via-orange-600 to-yellow-400 rounded opacity-75" />
-                <span className="text-lg text-white/70">preview audio</span>
-              </div>
-              <button
-                onClick={() => togglePlay(audioUrl, 'preview')}
-                className="px-4 py-1.5 sketch-border text-lg hover:bg-white/10 transition cursor-pointer"
-              >
-                {playingTrack === 'preview' ? '⏸ pause' : '▶ play'}
-              </button>
-            </div>
-
-            {/* CONFIG BOX (Blue outline as in drawing) */}
-            <div className="sketch-border-blue bg-[#121624] p-5 flex flex-col gap-4">
-              <div className="text-xl text-blue-400 font-bold uppercase tracking-wider">
-                config
+              {/* Real STFT Spectrogram Canvas */}
+              <div className="h-[210px] w-full overflow-hidden rounded-lg border border-white/10 relative">
+                {isAnalyzing ? (
+                  <div className="w-full h-full flex items-center justify-center bg-black/60 text-cyan-400 italic">
+                    Extracting STFT Frequency Bands...
+                  </div>
+                ) : (
+                  <SpectrogramCanvas
+                    matrix={analysis?.spectrogram}
+                    isEmpty={!analysis?.spectrogram}
+                  />
+                )}
               </div>
 
-              {/* [x] musical checkbox */}
-              <label className="flex items-center gap-3 text-2xl cursor-pointer select-none">
+              {/* Audio Preview Bar */}
+              <div className="mt-4 pt-3 border-t border-white/10 flex items-center justify-between">
+                <div className="flex items-center gap-2 text-sm text-slate-300 italic">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+                  <span>Input Waveform Ready</span>
+                </div>
+                <button
+                  onClick={() => togglePlay(audioUrl, 'preview')}
+                  className="px-4 py-1.5 neural-node text-sm hover:border-cyan-400 text-slate-200 transition cursor-pointer"
+                >
+                  {playingTrack === 'preview' ? '⏸ Pause' : '▶ Play Source'}
+                </button>
+              </div>
+            </div>
+
+            {/* NEURAL CONFIG NODE (Blue Box as in wireframe drawing) */}
+            <div className="neural-node-blue p-5 flex flex-col gap-4">
+              <div className="flex items-center justify-between text-xs tracking-widest uppercase text-blue-400 font-mono">
+                <span>[ADAPTER CONDITIONING CONFIG]</span>
+                <span className="text-blue-300/60">Bi-GRU + Multi-Head</span>
+              </div>
+
+              {/* [x] musical toggle */}
+              <label className="flex items-center gap-3 text-xl cursor-pointer select-none">
                 <input
                   type="checkbox"
                   checked={musical}
                   onChange={(e) => setMusical(e.target.checked)}
-                  className="w-6 h-6 rounded accent-blue-500 cursor-pointer"
+                  className="w-5 h-5 rounded accent-blue-500 cursor-pointer"
                 />
-                <span className={musical ? 'text-white font-bold' : 'text-white/60'}>
-                  [x] musical chords & space
+                <span className={musical ? 'text-white font-semibold' : 'text-slate-400'}>
+                  [x] Musical Chords & Studio Reverb
                 </span>
               </label>
 
-              {/* Genre Pills */}
+              {/* Genre Pills with Random Option */}
               <div>
-                <div className="text-lg text-white/60 mb-2">genre:</div>
+                <div className="text-sm italic text-slate-300 mb-2">Target Musical Genre:</div>
                 <div className="flex flex-wrap gap-2">
                   {GENRES.map((g) => (
                     <button
                       key={g}
                       onClick={() => setGenre(g)}
-                      className={`px-3 py-1 rounded-full text-base transition cursor-pointer ${
+                      className={`px-3 py-1 rounded-full text-sm font-serif transition cursor-pointer ${
                         genre === g
-                          ? 'bg-blue-600 text-white font-bold border border-blue-400'
-                          : 'sketch-border bg-white/5 text-white/70 hover:bg-white/10'
+                          ? 'bg-blue-600 text-white font-bold border border-blue-400 shadow-md shadow-blue-500/30'
+                          : 'neural-node text-slate-300 hover:border-blue-400/60'
                       }`}
                     >
-                      {g}
+                      {g === 'random' ? '🎲 Random' : g}
                     </button>
                   ))}
                 </div>
               </div>
 
-              {/* Seed & Bars */}
-              <div className="grid grid-cols-2 gap-3 pt-2">
+              {/* Seed & Length */}
+              <div className="grid grid-cols-2 gap-4 pt-2">
                 <div>
-                  <div className="text-sm text-white/60 mb-1">seed:</div>
+                  <div className="text-xs text-slate-300 mb-1 font-mono uppercase">Seed (Weights):</div>
                   <div className="flex items-center gap-2">
                     <input
                       type="number"
                       value={seed}
                       onChange={(e) => setSeed(parseInt(e.target.value) || 1)}
-                      className="w-full bg-[#1b2138] sketch-border px-3 py-1 text-lg text-white focus:outline-none"
+                      className="w-full bg-[#0a0e1c] border border-blue-500/40 rounded px-3 py-1 text-sm text-white focus:outline-none"
                     />
                     <button
                       onClick={() => setSeed(Math.floor(1000 + Math.random() * 900000))}
-                      title="Randomize Seed"
-                      className="p-1.5 sketch-border hover:bg-white/10 text-lg cursor-pointer"
+                      title="Generate Random Seed"
+                      className="p-1.5 neural-node text-sm hover:border-blue-400 cursor-pointer"
                     >
                       🎲
                     </button>
@@ -293,99 +313,120 @@ export default function Home() {
                 </div>
 
                 <div>
-                  <div className="text-sm text-white/60 mb-1">length:</div>
+                  <div className="text-xs text-slate-300 mb-1 font-mono uppercase">Bars / Duration:</div>
                   <select
                     value={bars}
                     onChange={(e) => setBars(parseInt(e.target.value))}
-                    className="w-full bg-[#1b2138] sketch-border px-3 py-1.5 text-lg text-white focus:outline-none cursor-pointer"
+                    className="w-full bg-[#0a0e1c] border border-blue-500/40 rounded px-3 py-1.5 text-sm text-white focus:outline-none cursor-pointer"
                   >
-                    <option value={4}>4 bars (short)</option>
-                    <option value={8}>8 bars (full)</option>
+                    <option value={4}>4 Bars (~7s)</option>
+                    <option value={8}>8 Bars (~14s)</option>
                   </select>
                 </div>
               </div>
             </div>
           </div>
 
-          {/* CENTER: Generate Action Button & Hand-Drawn Flow (2 cols) */}
-          <div className="lg:col-span-2 flex flex-col items-center justify-center my-auto py-6">
+          {/* CENTER: Synaptic Activation Nexus & Generate Button (2 cols) */}
+          <div className="lg:col-span-2 flex flex-col items-center justify-center my-auto py-8 relative">
             <button
               onClick={handleGenerate}
               disabled={isGenerating}
-              className={`w-full py-6 px-4 sketch-border-green bg-[#122818] hover:bg-[#1a3822] text-green-400 font-bold text-3xl transition transform active:scale-95 cursor-pointer flex flex-col items-center justify-center gap-2 shadow-lg shadow-green-950/40 ${
-                isGenerating ? 'opacity-50 animate-pulse' : ''
+              className={`w-full py-8 px-4 neural-node-green text-emerald-300 font-bold text-2xl transition transform active:scale-95 cursor-pointer flex flex-col items-center justify-center gap-3 relative overflow-hidden group ${
+                isGenerating ? 'opacity-60 animate-pulse' : 'hover:scale-[1.02]'
               }`}
             >
-              <span>{isGenerating ? 'generating...' : 'generate'}</span>
-              <span className="text-4xl">➔</span>
+              <div className="absolute inset-0 bg-emerald-500/10 blur-xl group-hover:bg-emerald-500/20 transition" />
+              <span className="tracking-wide relative z-10">
+                {isGenerating ? 'Synthesizing...' : 'Generate'}
+              </span>
+              <span className="text-3xl text-emerald-400 relative z-10">➔</span>
             </button>
 
-            {/* Hand-drawn branching wireframe indicator */}
-            <div className="hidden lg:flex flex-col items-center mt-6 text-white/30 text-xs">
-              <span className="text-2xl text-green-500">⤹ ⤸</span>
-              <span>resynthesizing stems</span>
+            {/* Neural Synapse Branching Indicators */}
+            <div className="hidden lg:flex flex-col items-center mt-6 text-emerald-400/60 font-mono text-xs text-center">
+              <span className="text-2xl animate-pulse">⤹ ⤸</span>
+              <span>4-Channel Stem Resynthesis</span>
             </div>
           </div>
 
-          {/* RIGHT COLUMN: Stacked Stem Cards (5 cols) */}
+          {/* RIGHT COLUMN: Output Stem Nodes with REAL Spectrograms (5 cols) */}
           <div className="lg:col-span-5 flex flex-col gap-4">
-            <div className="text-2xl font-bold flex items-center justify-between border-b border-white/10 pb-2">
-              <span>stems</span>
+            <div className="flex items-center justify-between border-b border-white/10 pb-2">
+              <span className="text-xs tracking-widest uppercase text-purple-400 font-mono">
+                [OUTPUT LAYER : RESYNTHESIZED STEMS]
+              </span>
               {masterUrl && (
                 <button
                   onClick={() => togglePlay(masterUrl, 'master')}
-                  className="px-4 py-1 sketch-border text-base bg-green-500/20 text-green-400 hover:bg-green-500/30 transition cursor-pointer"
+                  className="px-3 py-1 neural-node text-xs text-emerald-400 hover:border-emerald-400 transition cursor-pointer"
                 >
-                  {playingTrack === 'master' ? '⏸ pause full mix' : '▶ play full mix'}
+                  {playingTrack === 'master' ? '⏸ Pause Full Mix' : '▶ Play Full Mix'}
                 </button>
               )}
             </div>
 
-            {/* 4 Stacked Stem Cards exactly like the sketch */}
-            {[
-              { id: 'original', label: 'original', color: 'from-purple-900 to-indigo-700' },
-              { id: 'melody', label: 'melody', color: 'from-orange-800 to-yellow-600' },
-              { id: 'drums', label: 'drums', color: 'from-red-900 to-rose-700' },
-              { id: stems['chords'] ? 'chords' : 'bass', label: 'harmony', color: 'from-blue-900 to-cyan-700' },
-            ].map((stem) => {
-              const stemUrl = stems[stem.id] || stems['bass'];
-              const isReady = Boolean(stemUrl);
+            {/* Stem Output Nodes with REAL Spectrograms */}
+            {(stems['chords']
+              ? [
+                  { id: 'original', label: 'Original', desc: 'Beat Slice Pocket' },
+                  { id: 'melody', label: 'Melody', desc: 'Pitched Harmonic Lead' },
+                  { id: 'chords', label: 'Harmony', desc: 'Polyphonic 7th Chords' },
+                  { id: 'bass', label: 'Bass', desc: 'Resynthesized Sub-Bass' },
+                  { id: 'drums', label: 'Drums', desc: 'Kick, Snare & Hi-Hat' },
+                ]
+              : [
+                  { id: 'original', label: 'Original', desc: 'Beat Slice Pocket' },
+                  { id: 'melody', label: 'Melody', desc: 'Pitched Harmonic Lead' },
+                  { id: 'bass', label: 'Bass', desc: 'Resynthesized Sub-Bass' },
+                  { id: 'drums', label: 'Drums', desc: 'Kick, Snare & Hi-Hat' },
+                ]
+            ).map((stem) => {
+              const stemData = stems[stem.id];
+              const isReady = Boolean(stemData);
 
               return (
                 <div
                   key={stem.id}
-                  className={`sketch-border bg-[#13131a] p-3 flex items-center justify-between gap-4 transition ${
-                    isReady ? 'border-white' : 'opacity-40'
+                  className={`neural-node p-3 flex items-center justify-between gap-4 transition ${
+                    isReady ? 'border-white/30' : 'opacity-40'
                   }`}
                 >
                   {/* Stem Label */}
-                  <div className="w-24 text-2xl font-bold text-white capitalize">
-                    {stem.label}
+                  <div className="w-28 flex flex-col">
+                    <span className="text-lg font-bold text-white capitalize">
+                      {stem.label}
+                    </span>
+                    <span className="text-xs text-slate-400 italic">
+                      {stem.desc}
+                    </span>
                   </div>
 
-                  {/* Mini Spectrogram Slice */}
-                  <div className="flex-1 h-12 bg-[#0c0c10] rounded-lg overflow-hidden border border-white/10 flex items-center px-1">
-                    {isReady ? (
-                      <div
-                        className={`w-full h-8 bg-gradient-to-r ${stem.color} rounded opacity-80 animate-pulse`}
+                  {/* REAL Mini Spectrogram Canvas */}
+                  <div className="flex-1 h-14 bg-[#0a0b12] rounded-lg overflow-hidden border border-white/10 relative">
+                    {isReady && stemData?.spectrogram && stemData.spectrogram.length > 0 ? (
+                      <SpectrogramCanvas
+                        matrix={stemData.spectrogram}
+                        isMini
+                        height={56}
                       />
                     ) : (
-                      <div className="w-full text-center text-xs text-white/30">
-                        waiting for generate...
+                      <div className="w-full h-full flex items-center justify-center text-xs text-slate-500 italic">
+                        {isGenerating ? 'Synthesizing STFT...' : 'Awaiting Generate'}
                       </div>
                     )}
                   </div>
 
-                  {/* Play Button Icon */}
+                  {/* Stem Play / Pause Button */}
                   <button
                     disabled={!isReady}
-                    onClick={() => stemUrl && togglePlay(stemUrl, stem.id)}
-                    className={`w-12 h-12 sketch-border flex items-center justify-center text-xl transition cursor-pointer rounded-full ${
+                    onClick={() => stemData && togglePlay(stemData.audioUrl, stem.id)}
+                    className={`w-11 h-11 rounded-full border flex items-center justify-center text-base transition cursor-pointer ${
                       isReady
                         ? playingTrack === stem.id
-                          ? 'bg-white text-black font-bold'
-                          : 'hover:bg-white/10'
-                        : 'opacity-30 cursor-not-allowed'
+                          ? 'bg-white text-black font-bold border-white'
+                          : 'border-white/30 hover:border-cyan-400 text-white'
+                        : 'border-white/10 text-white/20 cursor-not-allowed'
                     }`}
                   >
                     {playingTrack === stem.id ? '⏸' : '▶'}
@@ -396,11 +437,11 @@ export default function Home() {
 
             {/* Master WAV Download Link */}
             {masterUrl && (
-              <div className="mt-4 pt-2">
+              <div className="mt-2 pt-2">
                 <a
                   href={masterUrl}
-                  download="charlie_composition.wav"
-                  className="block text-center py-3 sketch-border bg-white/5 hover:bg-white/15 text-xl font-bold transition"
+                  download="charlie_master_composition.wav"
+                  className="block text-center py-3 neural-node hover:border-emerald-400 text-emerald-300 text-lg transition font-semibold"
                 >
                   💾 Download Master Composition (WAV)
                 </a>

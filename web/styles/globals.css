@@ -1,38 +1,64 @@
-@import url('https://fonts.googleapis.com/css2?family=Caveat:wght@500;700&family=Gaegu:wght@400;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Caveat:wght@600;700&family=Gaegu:wght@400;700&family=Newsreader:ital,opsz,wght@0,6..72,300..700;1,6..72,300..700&family=Playfair+Display:ital,wght@0,400..700;1,400..700&display=swap');
 @import "tailwindcss";
 
 :root {
-  --bg-dark: #0d0d11;
-  --panel-dark: #141419;
-  --border-white: #ffffff;
-  --accent-blue: #3b82f6;
-  --accent-green: #22c55e;
+  --bg-deep: #08080c;
+  --node-bg: #0f1017;
+  --node-border: rgba(255, 255, 255, 0.16);
+  --synapse-cyan: #06b6d4;
+  --synapse-green: #10b981;
+  --synapse-purple: #8b5cf6;
 }
 
 body {
-  background-color: var(--bg-dark);
-  color: #f3f4f6;
-  font-family: 'Gaegu', 'Caveat', cursive, sans-serif;
-  letter-spacing: 0.02em;
+  background-color: var(--bg-deep);
+  color: #f1f5f9;
+  font-family: 'Newsreader', 'Playfair Display', Georgia, Cambria, serif;
+  letter-spacing: 0.01em;
   overflow-x: hidden;
 }
 
-/* Funky hand-drawn border effect */
-.sketch-border {
-  border: 2px solid rgba(255, 255, 255, 0.85);
-  border-radius: 18px 22px 20px 24px / 22px 18px 24px 20px;
-  box-shadow: 2px 3px 0px rgba(255, 255, 255, 0.12);
+/* Strictly only 'hey charlie' gets the funky handwriting font */
+.font-funky {
+  font-family: 'Gaegu', 'Caveat', cursive, sans-serif !important;
 }
 
-.sketch-border-blue {
-  border: 2px solid #3b82f6;
-  border-radius: 20px 24px 18px 22px / 22px 20px 24px 18px;
-  box-shadow: 0 0 15px rgba(59, 130, 246, 0.25);
+/* Neural Network Node Styling */
+.neural-node {
+  background: radial-gradient(circle at top left, #141624 0%, #0d0e17 100%);
+  border: 1.5px solid rgba(255, 255, 255, 0.18);
+  border-radius: 16px;
+  box-shadow: 0 8px 32px -4px rgba(0, 0, 0, 0.7), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  transition: all 0.25s ease;
 }
 
-.sketch-border-green {
-  border: 2px solid #22c55e;
-  border-radius: 22px 18px 24px 20px / 18px 24px 20px 22px;
+.neural-node:hover {
+  border-color: rgba(255, 255, 255, 0.35);
+  box-shadow: 0 12px 40px -4px rgba(0, 0, 0, 0.8), inset 0 1px 0 rgba(255, 255, 255, 0.15);
+}
+
+.neural-node-blue {
+  background: radial-gradient(circle at top left, #101c38 0%, #0c1224 100%);
+  border: 1.5px solid rgba(59, 130, 246, 0.6);
+  border-radius: 16px;
+  box-shadow: 0 0 25px rgba(59, 130, 246, 0.15), inset 0 1px 0 rgba(59, 130, 246, 0.3);
+}
+
+.neural-node-green {
+  background: radial-gradient(circle at top left, #0e2a1b 0%, #091a11 100%);
+  border: 1.5px solid rgba(16, 185, 129, 0.7);
+  box-shadow: 0 0 25px rgba(16, 185, 129, 0.2);
+}
+
+/* Synaptic connection line pulses */
+@keyframes pulseLine {
+  0% { stroke-dashoffset: 40; }
+  100% { stroke-dashoffset: 0; }
+}
+
+.synapse-active {
+  stroke-dasharray: 6 4;
+  animation: pulseLine 1.2s linear infinite;
 }
 
 /* Custom scrollbar */
@@ -41,7 +67,7 @@ body {
   height: 6px;
 }
 ::-webkit-scrollbar-track {
-  background: #0d0d11;
+  background: #08080c;
 }
 ::-webkit-scrollbar-thumb {
   background: #27272a;
