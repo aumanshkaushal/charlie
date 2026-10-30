@@ -2,13 +2,14 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import Head from 'next/head';
 import { FaDice, FaCheck, FaPlay, FaPause, FaDownload } from 'react-icons/fa6';
 import SpectrogramCanvas from '@/components/SpectrogramCanvas';
+import { CharlieAudioManager } from '@/lib/audioManager';
 
 const GENRES = ['random', 'lofi', 'rnb', 'house', 'trap', 'synthwave', 'afrobeat', 'ambient'];
 
 interface StemData {
   audioUrl: string;
   spectrogram: number[][];
-  duration?: number;
+  duration: number;
 }
 
 export default function Home() {
@@ -29,118 +30,97 @@ export default function Home() {
   const [masterSpectrogram, setMasterSpectrogram] = useState<number[][]>([]);
   const [masterDuration, setMasterDuration] = useState<number>(14);
 
-  // Unified Solid Audio Playback Engine
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const [activeTrackId, setActiveTrackId] = useState<string | null>(null);
-  const [activeDuration, setActiveDuration] = useState<number>(0);
-  const [currentTime, setCurrentTime] = useState<number>(0);
-  const [isPlaying, setIsPlaying] = useState<boolean>(false);
-  const rafRef = useRef<number | null>(null);
+  // Stems on/off live toggles in master mix (default: all ON)
+  const [stemMutes, setStemMutes] = useState<Record<string, boolean>>({
+    original: true,
+    melody: true,
+    drums: true,
+    harmony: true,
+    chords: true,
+    bass: true,
+  });
 
-  // Playhead smooth tracking loop
-  const syncPlayback = useCallback(() => {
-    if (audioRef.current && !audioRef.current.paused) {
-      setCurrentTime(audioRef.current.currentTime);
-      rafRef.current = requestAnimationFrame(syncPlayback);
-    }
+  // Web Audio API Engine
+  const audioManagerRef = useRef<CharlieAudioManager | null>(null);
+  const [activeTrackId, setActiveTrackId] = useState<string | null>(null);
+  const [currentTime, setCurrentTime] = useState<number>(0);
+  const [activeDuration, setActiveDuration] = useState<number>(0);
+  const [isPlaying, setIsPlaying] = useState<boolean>(false);
+
+  // Initialize AudioManager once
+  useEffect(() => {
+    audioManagerRef.current = new CharlieAudioManager();
+    return () => {
+      audioManagerRef.current?.stop();
+    };
   }, []);
 
-  // Stop & clear audio
-  const stopAudio = useCallback(() => {
-    if (rafRef.current) cancelAnimationFrame(rafRef.current);
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current.removeAttribute('src');
-      audioRef.current.load();
-      audioRef.current = null;
-    }
+  // Sync callbacks
+  const handleTimeUpdate = useCallback((t: number, d: number) => {
+    setCurrentTime(t);
+    setActiveDuration(d);
+  }, []);
+
+  const handlePlaybackEnd = useCallback(() => {
     setIsPlaying(false);
     setCurrentTime(0);
     setActiveTrackId(null);
   }, []);
 
-  useEffect(() => {
-    return () => {
-      stopAudio();
-    };
-  }, [stopAudio]);
+  // Play / Pause / Seek Handler
+  const handlePlayOrSeek = async (trackId: string, url: string, knownDur: number, seekTime?: number) => {
+    const mgr = audioManagerRef.current;
+    if (!mgr || !url) return;
 
-  // Play, Pause or Seek any track cleanly
-  const playOrSeekTrack = (trackId: string, url: string, knownDuration: number, seekTime?: number) => {
-    if (!url) return;
-
-    // Case 1: Same track already active
-    if (activeTrackId === trackId && audioRef.current) {
-      if (seekTime !== undefined) {
-        audioRef.current.currentTime = seekTime;
-        setCurrentTime(seekTime);
-        if (audioRef.current.paused) {
-          audioRef.current.play().then(() => {
-            setIsPlaying(true);
-            rafRef.current = requestAnimationFrame(syncPlayback);
-          }).catch(console.error);
-        }
-        return;
-      }
-
-      // Toggle pause/play
+    // Toggle Pause if same track clicked without seek
+    if (activeTrackId === trackId && seekTime === undefined) {
       if (isPlaying) {
-        audioRef.current.pause();
+        mgr.pause();
         setIsPlaying(false);
-        if (rafRef.current) cancelAnimationFrame(rafRef.current);
       } else {
-        audioRef.current.play().then(() => {
-          setIsPlaying(true);
-          rafRef.current = requestAnimationFrame(syncPlayback);
-        }).catch(console.error);
+        // Resume from current paused time
+        if (trackId === 'master') {
+          await mgr.playMasterMix(stems, stemMutes, currentTime, masterUrl, handleTimeUpdate, handlePlaybackEnd);
+        } else {
+          await mgr.playSingle(trackId, url, currentTime, handleTimeUpdate, handlePlaybackEnd);
+        }
+        setIsPlaying(true);
       }
       return;
     }
 
-    // Case 2: New track selected
-    if (audioRef.current) {
-      audioRef.current.pause();
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
-    }
-
-    const audio = new Audio(url);
-    audioRef.current = audio;
+    // Play or seek
+    const targetSeek = seekTime !== undefined ? seekTime : 0;
     setActiveTrackId(trackId);
-    setActiveDuration(knownDuration || 14);
+    setCurrentTime(targetSeek);
+    setActiveDuration(knownDur);
+    setIsPlaying(true);
 
-    const startPlaying = () => {
-      const dur = audio.duration && !isNaN(audio.duration) ? audio.duration : knownDuration;
-      setActiveDuration(dur);
-
-      if (seekTime !== undefined) {
-        audio.currentTime = Math.min(seekTime, dur);
-        setCurrentTime(audio.currentTime);
-      } else {
-        setCurrentTime(0);
-      }
-
-      audio.play().then(() => {
-        setIsPlaying(true);
-        rafRef.current = requestAnimationFrame(syncPlayback);
-      }).catch(console.error);
-    };
-
-    audio.onloadedmetadata = startPlaying;
-    audio.onended = () => {
-      setIsPlaying(false);
-      setCurrentTime(0);
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
-    };
-
-    // If cached or immediately ready
-    if (audio.readyState >= 2) {
-      startPlaying();
+    if (trackId === 'master') {
+      await mgr.playMasterMix(stems, stemMutes, targetSeek, masterUrl, handleTimeUpdate, handlePlaybackEnd);
+    } else {
+      await mgr.playSingle(trackId, url, targetSeek, handleTimeUpdate, handlePlaybackEnd);
     }
+  };
+
+  // Toggle Stem ON / OFF in Master Mix
+  const toggleStemMute = (stemKey: string) => {
+    setStemMutes((prev) => {
+      const nextState = !prev[stemKey];
+      const updated = { ...prev, [stemKey]: nextState };
+      // Live update Web Audio gain without interrupting playback!
+      audioManagerRef.current?.setStemEnabled(stemKey, nextState);
+      return updated;
+    });
   };
 
   // Upload sound file
   const handleUpload = async (file: File) => {
-    stopAudio();
+    audioManagerRef.current?.stop();
+    setIsPlaying(false);
+    setActiveTrackId(null);
+    setCurrentTime(0);
+
     setFileName(file.name);
     setStems({});
     setMasterUrl('');
@@ -164,7 +144,11 @@ export default function Home() {
 
   // Load preset audio
   const loadPreset = async (name: string) => {
-    stopAudio();
+    audioManagerRef.current?.stop();
+    setIsPlaying(false);
+    setActiveTrackId(null);
+    setCurrentTime(0);
+
     setFileName(name);
     setFilePath(name);
     setAudioUrl(`/api/audio?file=${encodeURIComponent(name)}`);
@@ -184,7 +168,10 @@ export default function Home() {
   // Generate multi-stem & master composition
   const handleGenerate = async () => {
     if (!filePath) return;
-    stopAudio();
+    audioManagerRef.current?.stop();
+    setIsPlaying(false);
+    setActiveTrackId(null);
+    setCurrentTime(0);
     setIsGenerating(true);
 
     try {
@@ -217,19 +204,19 @@ export default function Home() {
   const inputDur = analysis?.duration || 3.5;
 
   return (
-    <div className="min-h-screen bg-[#060609] text-white p-4 md:p-8 flex flex-col font-serif selection:bg-cyan-500/30">
+    <div className="min-h-screen bg-[#060609] text-white p-4 md:p-8 flex flex-col font-sans selection:bg-cyan-500/30">
       <Head>
         <title>hey charlie</title>
         <meta name="description" content="Neural audio architecture" />
         <link rel="icon" href="data:," />
       </Head>
 
-      {/* Header: only 'hey charlie' is funky handwriting, everything else serif */}
+      {/* Header: strictly only 'hey charlie' has funky handwriting, everything else is sans-serif */}
       <header className="mb-4 flex items-baseline justify-between max-w-7xl mx-auto w-full">
         <h1 className="font-funky text-5xl md:text-6xl text-white select-none">
           hey charlie
         </h1>
-        <div className="flex items-center gap-2 text-sm">
+        <div className="flex items-center gap-2 text-xs font-medium">
           <button
             onClick={() => loadPreset('mug-beat.mp3')}
             className="px-2.5 py-1 border border-white/20 rounded hover:border-white text-slate-300 transition cursor-pointer"
@@ -245,7 +232,7 @@ export default function Home() {
         </div>
       </header>
 
-      {/* Main Neural Network Workspace */}
+      {/* Main Neural Workspace */}
       <main className="flex-1 max-w-7xl mx-auto w-full flex items-center justify-center">
         {!filePath ? (
           /* STATE 1: Empty Wireframe State */
@@ -258,7 +245,7 @@ export default function Home() {
                 className="hidden"
                 onChange={(e) => e.target.files?.[0] && handleUpload(e.target.files[0])}
               />
-              <span className="text-2xl font-serif text-white group-hover:scale-105 transition">
+              <span className="text-xl font-medium text-white group-hover:scale-105 transition">
                 Upload MP3
               </span>
             </label>
@@ -357,7 +344,7 @@ export default function Home() {
             {/* Grid Layout: Input + Config (4 cols) | Generate (1.5 cols) | 4 Stems (3.5 cols) | Master (3 cols) */}
             <div className="grid grid-cols-1 xl:grid-cols-12 gap-5 items-start relative z-10">
               
-              {/* COLUMN 1: Input Spectrogram + Preview + Config (approx 3.5 cols) */}
+              {/* COLUMN 1: Input Spectrogram + Preview + Config */}
               <div className="xl:col-span-4 flex flex-col gap-2.5">
                 {/* Main Input Spectrogram Card */}
                 <div className="border border-white/60 rounded-xl p-2 bg-black/60 relative">
@@ -368,18 +355,18 @@ export default function Home() {
                       duration={inputDur}
                       currentTime={activeTrackId === 'input' ? currentTime : 0}
                       isPlaying={activeTrackId === 'input' && isPlaying}
-                      onSeek={(t) => playOrSeekTrack('input', audioUrl, inputDur, t)}
+                      onSeek={(t) => handlePlayOrSeek('input', audioUrl, inputDur, t)}
                     />
                   </div>
                 </div>
 
                 {/* File Name directly below spectrogram */}
-                <div className="text-center font-serif text-slate-300 text-sm">
+                <div className="text-center text-slate-300 text-xs font-medium truncate px-2">
                   {fileName || 'audio.mp3'}
                 </div>
 
-                {/* Mini Preview Player Bar */}
-                <div className="border border-white/40 rounded-lg p-1.5 flex items-center justify-between gap-2.5 bg-black/40">
+                {/* Mini Preview Player Bar with Download Button */}
+                <div className="border border-white/40 rounded-lg p-1.5 flex items-center justify-between gap-2 bg-black/40">
                   <div className="flex-1 h-7 rounded overflow-hidden">
                     <SpectrogramCanvas
                       matrix={analysis?.spectrogram}
@@ -389,26 +376,38 @@ export default function Home() {
                       duration={inputDur}
                       currentTime={activeTrackId === 'input' ? currentTime : 0}
                       isPlaying={activeTrackId === 'input' && isPlaying}
-                      onSeek={(t) => playOrSeekTrack('input', audioUrl, inputDur, t)}
+                      onSeek={(t) => handlePlayOrSeek('input', audioUrl, inputDur, t)}
                     />
                   </div>
-                  <button
-                    onClick={() => playOrSeekTrack('input', audioUrl, inputDur)}
-                    className="px-3 py-0.5 border border-white/40 rounded text-xs hover:border-white transition font-serif cursor-pointer flex items-center gap-1.5"
-                  >
-                    {activeTrackId === 'input' && isPlaying ? <FaPause className="text-[10px]" /> : <FaPlay className="text-[10px]" />}
-                    <span>{activeTrackId === 'input' && isPlaying ? 'pause' : 'play'}</span>
-                  </button>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      onClick={() => handlePlayOrSeek('input', audioUrl, inputDur)}
+                      className="px-2.5 py-0.5 border border-white/40 rounded text-xs hover:border-white transition cursor-pointer flex items-center gap-1"
+                    >
+                      {activeTrackId === 'input' && isPlaying ? <FaPause className="text-[10px]" /> : <FaPlay className="text-[10px]" />}
+                      <span>{activeTrackId === 'input' && isPlaying ? 'pause' : 'play'}</span>
+                    </button>
+                    {audioUrl && (
+                      <a
+                        href={audioUrl}
+                        download={fileName || 'input_audio.mp3'}
+                        title="Download input sound"
+                        className="p-1 border border-white/30 rounded hover:border-white text-slate-300 transition cursor-pointer flex items-center justify-center"
+                      >
+                        <FaDownload className="text-[10px]" />
+                      </a>
+                    )}
+                  </div>
                 </div>
 
                 {/* Config Label */}
-                <div className="text-slate-400 text-xs italic font-serif mt-1">
+                <div className="text-slate-400 text-xs mt-1">
                   config
                 </div>
 
                 {/* Blue Outline Config Box */}
                 <div className="border-2 border-blue-500 rounded-xl p-2.5 flex flex-wrap items-center justify-between gap-2 bg-blue-950/10">
-                  {/* musical checkmark checkbox (No literal [x]) */}
+                  {/* musical checkmark checkbox */}
                   <button
                     onClick={() => setMusical(!musical)}
                     className="flex items-center gap-2 cursor-pointer select-none group"
@@ -420,13 +419,13 @@ export default function Home() {
                     >
                       {musical && <FaCheck className="text-[10px]" />}
                     </div>
-                    <span className="font-serif text-sm text-slate-200 group-hover:text-white">
+                    <span className="text-xs text-slate-200 group-hover:text-white font-medium">
                       musical
                     </span>
                   </button>
 
                   {/* genre dropdown with react-icons dice */}
-                  <div className="flex items-center gap-1.5 font-serif text-sm">
+                  <div className="flex items-center gap-1.5 text-xs">
                     <span className="text-slate-400 text-xs">genre:</span>
                     <div className="relative flex items-center">
                       <select
@@ -448,7 +447,7 @@ export default function Home() {
 
                   {/* seed box with react-icons dice */}
                   <div className="flex items-center gap-1 border border-blue-400/50 rounded px-1.5 py-0.5 bg-black/80">
-                    <span className="text-[11px] text-slate-400 font-serif">seed:</span>
+                    <span className="text-[11px] text-slate-400">seed:</span>
                     <input
                       type="number"
                       value={seed}
@@ -466,23 +465,23 @@ export default function Home() {
                 </div>
               </div>
 
-              {/* COLUMN 2: Generate Button with Green Arrow (approx 1.5 cols) */}
+              {/* COLUMN 2: Generate Button with Green Arrow */}
               <div className="xl:col-span-1 flex flex-col items-center justify-center my-auto py-8">
                 <button
                   onClick={handleGenerate}
                   disabled={isGenerating}
-                  className={`flex items-center gap-1.5 px-4 py-2.5 border border-white/60 rounded-xl text-base font-serif transition cursor-pointer hover:border-emerald-400 hover:text-emerald-300 group bg-black/60 ${
+                  className={`flex items-center gap-1.5 px-4 py-2.5 border border-white/60 rounded-xl text-sm font-medium transition cursor-pointer hover:border-emerald-400 hover:text-emerald-300 group bg-black/60 ${
                     isGenerating ? 'opacity-50 animate-pulse' : 'hover:scale-105'
                   }`}
                 >
-                  <span className="text-sm">{isGenerating ? 'generating' : 'generate'}</span>
+                  <span>{isGenerating ? 'generating' : 'generate'}</span>
                   <span className="text-xl text-emerald-400 font-bold group-hover:translate-x-1 transition-transform">
                     ➔
                   </span>
                 </button>
               </div>
 
-              {/* COLUMN 3: 4 Output Stems (approx 4 cols) */}
+              {/* COLUMN 3: 4 Output Stems with On/Off Switch & Download Buttons */}
               <div className="xl:col-span-4 flex flex-col gap-2.5">
                 {[
                   { id: 'original', label: 'original' },
@@ -495,14 +494,35 @@ export default function Home() {
                   const hasStem = Boolean(stem && stem.spectrogram && stem.spectrogram.length > 0);
                   const stemDur = stem?.duration || 14;
                   const isTrackActive = activeTrackId === item.id;
+                  const isEnabledInMaster = stemMutes[stemKey] !== false;
 
                   return (
                     <div key={item.id} className="flex flex-col">
-                      <span className="font-serif text-xs text-slate-300 ml-1 mb-0.5">
-                        {item.label}
-                      </span>
+                      {/* Top Bar above stem: Label + On/Off Switch in Master */}
+                      <div className="flex items-center justify-between px-1 mb-0.5 text-xs">
+                        <span className="text-slate-300 font-medium">
+                          {item.label}
+                        </span>
 
-                      <div className="border border-white/40 rounded-xl p-1.5 flex items-center justify-between gap-2.5 bg-black/50">
+                        {/* On / Off Switch for inclusion in Master Mix */}
+                        <button
+                          onClick={() => toggleStemMute(stemKey)}
+                          title={`Turn ${item.label} ${isEnabledInMaster ? 'OFF' : 'ON'} in Master`}
+                          className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] transition cursor-pointer font-medium ${
+                            isEnabledInMaster
+                              ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/50'
+                              : 'bg-red-950/30 text-slate-500 border border-slate-700 hover:text-slate-300'
+                          }`}
+                        >
+                          <span className={`w-1.5 h-1.5 rounded-full ${isEnabledInMaster ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'}`} />
+                          <span>{isEnabledInMaster ? 'in master: ON' : 'in master: OFF'}</span>
+                        </button>
+                      </div>
+
+                      {/* Stem Box: Spectrogram + Download + Play */}
+                      <div className={`border rounded-xl p-1.5 flex items-center justify-between gap-2 bg-black/50 transition ${
+                        isEnabledInMaster ? 'border-white/40' : 'border-white/15 opacity-60'
+                      }`}>
                         {/* Interactive Click-to-Seek Spectrogram */}
                         <div className="flex-1 h-12 rounded overflow-hidden bg-black/40">
                           {hasStem ? (
@@ -513,7 +533,7 @@ export default function Home() {
                               duration={stemDur}
                               currentTime={isTrackActive ? currentTime : 0}
                               isPlaying={isTrackActive && isPlaying}
-                              onSeek={(t) => playOrSeekTrack(item.id, stem.audioUrl, stemDur, t)}
+                              onSeek={(t) => handlePlayOrSeek(item.id, stem.audioUrl, stemDur, t)}
                             />
                           ) : (
                             <SpectrogramCanvas
@@ -525,43 +545,53 @@ export default function Home() {
                           )}
                         </div>
 
-                        {/* Round Play Button with React-Icons */}
-                        <button
-                          disabled={!hasStem}
-                          onClick={() => stem && playOrSeekTrack(item.id, stem.audioUrl, stemDur)}
-                          className={`w-8 h-8 rounded-full border flex items-center justify-center text-xs transition cursor-pointer shrink-0 ${
-                            hasStem
-                              ? isTrackActive && isPlaying
-                                ? 'border-white bg-white text-black'
-                                : 'border-white/50 text-white hover:border-white'
-                              : 'border-white/10 text-white/20 cursor-not-allowed'
-                          }`}
-                        >
-                          {isTrackActive && isPlaying ? <FaPause /> : <FaPlay className="ml-0.5" />}
-                        </button>
+                        {/* Action buttons: Download + Play Button */}
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {/* Download Button Next to Play */}
+                          {hasStem && (
+                            <a
+                              href={stem.audioUrl}
+                              download={`${item.label}.wav`}
+                              title={`Download ${item.label} stem WAV`}
+                              className="w-8 h-8 rounded-full border border-white/30 hover:border-white text-slate-300 hover:text-white flex items-center justify-center text-xs transition cursor-pointer"
+                            >
+                              <FaDownload className="text-[10px]" />
+                            </a>
+                          )}
+
+                          {/* Round Play Button */}
+                          <button
+                            disabled={!hasStem}
+                            onClick={() => stem && handlePlayOrSeek(item.id, stem.audioUrl, stemDur)}
+                            title={`Play ${item.label} solo`}
+                            className={`w-8 h-8 rounded-full border flex items-center justify-center text-xs transition cursor-pointer ${
+                              hasStem
+                                ? isTrackActive && isPlaying
+                                  ? 'border-white bg-white text-black'
+                                  : 'border-white/50 text-white hover:border-white'
+                                : 'border-white/10 text-white/20 cursor-not-allowed'
+                            }`}
+                          >
+                            {isTrackActive && isPlaying ? <FaPause /> : <FaPlay className="ml-0.5" />}
+                          </button>
+                        </div>
                       </div>
                     </div>
                   );
                 })}
               </div>
 
-              {/* COLUMN 4: CONVERGING MASTER NODE (approx 2.5 cols) */}
+              {/* COLUMN 4: CONVERGING MASTER NODE */}
               <div className="xl:col-span-3 flex flex-col justify-center my-auto pt-2 xl:pt-0">
                 <div className="border border-emerald-500/60 rounded-xl p-3 bg-emerald-950/20 flex flex-col gap-2">
                   <div className="flex items-center justify-between">
-                    <span className="font-serif text-sm font-semibold text-emerald-300">
+                    <span className="text-xs font-semibold text-emerald-300 uppercase tracking-wider">
                       master
                     </span>
                     {masterUrl && (
-                      <a
-                        href={masterUrl}
-                        download="charlie_master.wav"
-                        title="Download Master WAV"
-                        className="text-xs text-emerald-400 hover:text-white transition flex items-center gap-1 font-serif cursor-pointer"
-                      >
-                        <FaDownload className="text-[10px]" />
-                        <span>wav</span>
-                      </a>
+                      <span className="text-[11px] text-emerald-400/80">
+                        active stems live mix
+                      </span>
                     )}
                   </div>
 
@@ -574,7 +604,7 @@ export default function Home() {
                         duration={masterDuration}
                         currentTime={activeTrackId === 'master' ? currentTime : 0}
                         isPlaying={activeTrackId === 'master' && isPlaying}
-                        onSeek={(t) => playOrSeekTrack('master', masterUrl, masterDuration, t)}
+                        onSeek={(t) => handlePlayOrSeek('master', masterUrl, masterDuration, t)}
                       />
                     ) : (
                       <SpectrogramCanvas
@@ -586,30 +616,44 @@ export default function Home() {
                     )}
                   </div>
 
-                  {/* Prominent Master Play Button */}
-                  <button
-                    disabled={!masterUrl}
-                    onClick={() => masterUrl && playOrSeekTrack('master', masterUrl, masterDuration)}
-                    className={`w-full py-2.5 rounded-lg border font-serif text-sm flex items-center justify-center gap-2 transition cursor-pointer ${
-                      masterUrl
-                        ? activeTrackId === 'master' && isPlaying
-                          ? 'bg-emerald-500 border-emerald-400 text-black font-bold'
-                          : 'border-emerald-400/80 text-emerald-300 hover:bg-emerald-500/10'
-                        : 'border-white/10 text-white/20 cursor-not-allowed'
-                    }`}
-                  >
-                    {activeTrackId === 'master' && isPlaying ? (
-                      <>
-                        <FaPause className="text-xs" />
-                        <span>pause master</span>
-                      </>
-                    ) : (
-                      <>
-                        <FaPlay className="text-xs" />
-                        <span>play master</span>
-                      </>
+                  {/* Prominent Master Play & Download Bar */}
+                  <div className="flex items-center gap-2">
+                    <button
+                      disabled={!masterUrl}
+                      onClick={() => masterUrl && handlePlayOrSeek('master', masterUrl, masterDuration)}
+                      className={`flex-1 py-2.5 rounded-lg border text-xs font-medium flex items-center justify-center gap-2 transition cursor-pointer ${
+                        masterUrl
+                          ? activeTrackId === 'master' && isPlaying
+                            ? 'bg-emerald-500 border-emerald-400 text-black font-bold'
+                            : 'border-emerald-400/80 text-emerald-300 hover:bg-emerald-500/10'
+                          : 'border-white/10 text-white/20 cursor-not-allowed'
+                      }`}
+                    >
+                      {activeTrackId === 'master' && isPlaying ? (
+                        <>
+                          <FaPause className="text-[11px]" />
+                          <span>pause master</span>
+                        </>
+                      ) : (
+                        <>
+                          <FaPlay className="text-[11px]" />
+                          <span>play master</span>
+                        </>
+                      )}
+                    </button>
+
+                    {/* Download Button Next to Master Play Button */}
+                    {masterUrl && (
+                      <a
+                        href={masterUrl}
+                        download="charlie_master.wav"
+                        title="Download Master WAV"
+                        className="p-2.5 rounded-lg border border-emerald-400/80 text-emerald-300 hover:bg-emerald-500/10 transition flex items-center justify-center cursor-pointer"
+                      >
+                        <FaDownload className="text-xs" />
+                      </a>
                     )}
-                  </button>
+                  </div>
                 </div>
               </div>
 
