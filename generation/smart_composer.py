@@ -1,12 +1,16 @@
-"""Generative Seed-Driven Musical Arrangement Engine for Charlie.
-Generates unique rhythms, melodic contours, chord progressions, and drum pockets
-conditioned on the neural network's predictions, audio timbre, and random/custom seeds.
+"""Multi-Genre Generative Sound-to-Music Engine for Charlie.
+Transforms any environmental sound (e.g. mug beat) into radically distinct musical genres:
+  - Lofi Hip-Hop (82 BPM, swung pocket, jazzy chords, mellow keys)
+  - House / Dance (126 BPM, 4-on-the-floor, offbeat hats, energetic stabs)
+  - Trap / 808 (140 BPM, half-time snare, booming sub-glide, triplet hats)
+  - Dark Synthwave (114 BPM, driving 8th-note bass, retro arpeggio)
+  - Afrobeat (112 BPM, polyrhythmic syncopation, bouncy bounce)
+  - Ambient Soundscape (72 BPM, slow spatial bells, ethereal sub drone)
 """
 import random
 import numpy as np
 import librosa
 from scipy.signal import butter, lfilter
-from audio.features import extract_features, NOTE_NAMES
 from audio.sampler import EnvironmentalSoundSampler, butter_lowpass_filter, butter_highpass_filter
 from audio.mixer import mix_tracks
 from audio.midi_generator import get_scale_pitches
@@ -14,110 +18,163 @@ from audio.midi_generator import get_scale_pitches
 
 DEFAULT_SR = 22050
 
-# Musical scale modes
-SCALE_PROGRESSIONS = {
-    "minor": [
-        [(0, "i"), (5, "VI"), (2, "III"), (6, "VII")],      # Emotional / Lofi (i - VI - III - VII)
-        [(0, "i"), (3, "iv"), (4, "v"), (0, "i")],          # Deep / Neo-Soul (i - iv - v - i)
-        [(0, "i"), (5, "VI"), (3, "iv"), (4, "v")],         # Dark Groove
-        [(0, "i"), (6, "VII"), (5, "VI"), (6, "VII")],      # Andalusian / Driving
-    ],
-    "major": [
-        [(0, "I"), (4, "V"), (5, "vi"), (3, "IV")],         # Uplifting Pop (I - V - vi - IV)
-        [(0, "I"), (3, "IV"), (4, "V"), (3, "IV")],         # Rhythmic Funk
-        [(1, "ii"), (4, "V"), (0, "I"), (5, "vi")],         # Jazz / Chillout (ii - V - I - vi)
-    ]
+GENRES = ["lofi", "house", "trap", "synthwave", "afrobeat", "ambient"]
+
+GENRE_CONFIGS = {
+    "lofi": {
+        "bpm_range": (82, 88),
+        "default_bpm": 84.0,
+        "scale_types": ["minor", "pentatonic", "blues"],
+        "swing": 0.08,
+        "melody_octave": 4,
+        "melody_cutoff": 1800.0,
+        "bass_cutoff": 180.0,
+        "description": "Chill Lo-Fi Hip-Hop (swung beat, jazzy chords, warm sub)",
+    },
+    "house": {
+        "bpm_range": (124, 128),
+        "default_bpm": 126.0,
+        "scale_types": ["minor", "major"],
+        "swing": 0.0,
+        "melody_octave": 4,
+        "melody_cutoff": 4000.0,
+        "bass_cutoff": 220.0,
+        "description": "Club House & Dance (4-on-the-floor kick, offbeat hats, energetic stabs)",
+    },
+    "trap": {
+        "bpm_range": (138, 144),
+        "default_bpm": 140.0,
+        "scale_types": ["minor", "blues"],
+        "swing": 0.0,
+        "melody_octave": 5,
+        "melody_cutoff": 3500.0,
+        "bass_cutoff": 160.0,
+        "description": "Hard-Hitting Trap (booming 808 bass, half-time snare, rolling hi-hats)",
+    },
+    "synthwave": {
+        "bpm_range": (112, 118),
+        "default_bpm": 115.0,
+        "scale_types": ["minor"],
+        "swing": 0.0,
+        "melody_octave": 4,
+        "melody_cutoff": 3000.0,
+        "bass_cutoff": 240.0,
+        "description": "Dark Synthwave (driving 8th-note bassline, arpeggiated melodic hooks)",
+    },
+    "afrobeat": {
+        "bpm_range": (108, 115),
+        "default_bpm": 112.0,
+        "scale_types": ["pentatonic", "major", "minor"],
+        "swing": 0.05,
+        "melody_octave": 4,
+        "melody_cutoff": 3200.0,
+        "bass_cutoff": 200.0,
+        "description": "Afrobeat Groove (syncopated polyrhythms, bouncy percussion)",
+    },
+    "ambient": {
+        "bpm_range": (68, 76),
+        "default_bpm": 72.0,
+        "scale_types": ["minor", "pentatonic", "major"],
+        "swing": 0.0,
+        "melody_octave": 4,
+        "melody_cutoff": 2200.0,
+        "bass_cutoff": 150.0,
+        "description": "Cinematic Ambient (slow spatial bells, deep atmospheric drone)",
+    },
 }
 
-# Rhythmic drum groove styles
-DRUM_STYLES = ["boom_bap", "trap_half", "afro_syncopated", "four_on_floor", "lofi_swing"]
 
-
-def quantize_and_loop_source(
+def extract_and_groove_slices(
     waveform: np.ndarray,
     sr: int = DEFAULT_SR,
-    bpm: float = 136.0,
+    bpm: float = 120.0,
     total_bars: int = 8,
-    beats_per_bar: int = 4,
+    genre: str = "lofi",
     seed: int = None,
-) -> tuple[np.ndarray, list[np.ndarray]]:
+) -> np.ndarray:
     """
-    Slices individual hits from the original recording and aligns each hit
-    precisely to the beat grid (zero latency, zero phase clash).
+    Rhythmically arranges the user's recorded sound hits according to the selected genre groove.
+    Does NOT monotonously click every beat:
+      - In House: plays on the offbeat (& of every beat) like a dance shaker.
+      - In Trap: plays syncopated trap ghost-accents.
+      - In Lofi: plays with swung offbeat pocket.
+      - In Ambient: plays sparse spatial drops on bar 1 and 3.
     """
     rng = random.Random(seed)
-    seconds_per_beat = 60.0 / max(bpm, 20.0)
+    seconds_per_beat = 60.0 / bpm
     samples_per_beat = int(seconds_per_beat * sr)
-    samples_per_bar = samples_per_beat * beats_per_bar
+    samples_per_bar = samples_per_beat * 4
     total_samples = samples_per_bar * total_bars
 
+    # Detect hits
     onset_frames = librosa.onset.onset_detect(y=waveform, sr=sr, backtrack=True)
     raw_samples = librosa.frames_to_samples(onset_frames)
 
     min_spacing = int(sr * 0.06)
-    filtered_onsets = []
-    last_pos = -min_spacing
-    for pos in raw_samples:
-        if pos - last_pos >= min_spacing and pos < len(waveform) - min_spacing:
-            filtered_onsets.append(pos)
-            last_pos = pos
-
-    if not filtered_onsets:
-        filtered_onsets = [0]
+    filtered = []
+    last_p = -min_spacing
+    for p in raw_samples:
+        if p - last_p >= min_spacing and p < len(waveform) - min_spacing:
+            filtered.append(p)
+            last_p = p
+    if not filtered:
+        filtered = [0]
 
     hits = []
-    max_hit_len = int(samples_per_beat * 0.85)
-
-    for i in range(len(filtered_onsets)):
-        start = filtered_onsets[i]
-        end = filtered_onsets[i + 1] if i + 1 < len(filtered_onsets) else len(waveform)
-        slice_end = min(start + max_hit_len, end)
-
-        if slice_end <= start + int(sr * 0.02):
+    max_len = int(samples_per_beat * 0.8)
+    for i in range(len(filtered)):
+        st = filtered[i]
+        en = filtered[i + 1] if i + 1 < len(filtered) else len(waveform)
+        hit = waveform[st:min(st + max_len, en)].copy()
+        if len(hit) < int(sr * 0.02):
             continue
-
-        hit = waveform[start:slice_end].copy()
-        if len(hit) == 0:
-            continue
-
-        fade_len = min(int(sr * 0.02), len(hit))
-        if fade_len > 0:
-            hit[-fade_len:] *= np.linspace(1.0, 0.0, fade_len)
-
         peak = float(np.max(np.abs(hit)))
         if peak > 0.01:
-            hit = hit / peak * 0.9
+            hit = hit / peak * 0.85
             hits.append(hit.astype(np.float32))
 
     if not hits:
-        safe_len = min(max_hit_len, len(waveform))
-        fallback = waveform[:safe_len].copy()
-        peak = float(np.max(np.abs(fallback))) if len(fallback) > 0 else 1.0
-        if peak > 0:
-            fallback = fallback / peak * 0.9
-        hits = [fallback.astype(np.float32)]
+        hits = [waveform[:max_len]]
 
     quantized_track = np.zeros(total_samples, dtype=np.float32)
-    total_beats = total_bars * beats_per_bar
 
-    # Subtle groove variation per beat
-    for b in range(total_beats):
-        beat_start_sample = b * samples_per_beat
-        # Cycle or sample with slight probability
-        hit_idx = b % len(hits)
-        hit = hits[hit_idx]
+    # Genre-specific placement of original recording
+    for bar in range(total_bars):
+        bar_start_sec = bar * (seconds_per_beat * 4.0)
 
-        copy_len = min(len(hit), total_samples - beat_start_sample)
-        if copy_len > 0:
-            quantized_track[beat_start_sample:beat_start_sample + copy_len] += hit[:copy_len]
+        if genre == "house":
+            # Upbeat Latin / House shaker pattern on 0.5, 1.5, 2.5, 3.5
+            hit_beats = [0.5, 1.5, 2.5, 3.5]
+        elif genre == "trap":
+            # Syncopated trap ghost-notes
+            hit_beats = [0.0, 0.75, 1.75, 2.5, 3.25]
+        elif genre == "afrobeat":
+            # 3-against-2 syncopation
+            hit_beats = [0.0, 0.75, 1.5, 2.25, 3.0]
+        elif genre == "ambient":
+            # Sparse spatial hits
+            hit_beats = [0.0, 2.5] if bar % 2 == 0 else [1.5]
+        else:  # lofi / synthwave
+            # Swung laid-back hits
+            hit_beats = [0.0, 1.0 + 0.05, 2.0, 3.0 + 0.05]
 
-    return quantized_track, hits
+        for b in hit_beats:
+            hit_sec = bar_start_sec + b * seconds_per_beat
+            start_s = int(hit_sec * sr)
+            if start_s >= total_samples:
+                continue
+
+            hit = hits[int(b * 2) % len(hits)]
+            copy_len = min(len(hit), total_samples - start_s)
+            if copy_len > 0:
+                quantized_track[start_s:start_s + copy_len] += hit[:copy_len]
+
+    return quantized_track
 
 
 class IntelligentComposer:
     """
-    Generative AI Composer: creates unique melodies, basslines, chord progressions,
-    and drum patterns on every run conditioned on seed, neural probabilities, and input audio.
+    Transforms any recorded sound into radically diverse musical worlds.
     """
     def __init__(self, sample_rate: int = DEFAULT_SR):
         self.sr = sample_rate
@@ -128,109 +185,105 @@ class IntelligentComposer:
         predictions: dict,
         target_bars: int = 8,
         seed: int = None,
+        genre: str = None,
         mood: str = "Chill",
     ) -> dict:
-        # 1. Deterministic or stochastic seed
         if seed is None:
-            seed = random.randint(1, 999999)
+            seed = random.randint(1000, 999999)
         rng = random.Random(seed)
-        np_rng = np.random.default_rng(seed)
 
-        bpm = float(predictions.get("detected_bpm", 136.0))
-        key = str(predictions.get("predicted_key", "D"))
-        scale_type = str(predictions.get("predicted_scale", "minor"))
-        rhythm_probs = predictions.get("rhythm_probabilities", [[0.5]*16 for _ in range(4)])
+        # Select genre
+        if not genre or genre.lower() not in GENRE_CONFIGS:
+            # Seed picks the genre
+            genre = rng.choice(GENRES)
+        else:
+            genre = genre.lower()
 
-        seconds_per_beat = 60.0 / max(bpm, 30.0)
+        g_cfg = GENRE_CONFIGS[genre]
+
+        # 1. Tempo & Musical Time based on genre
+        min_bpm, max_bpm = g_cfg["bpm_range"]
+        bpm = float(rng.randint(min_bpm, max_bpm))
+
+        seconds_per_beat = 60.0 / bpm
         seconds_per_bar = seconds_per_beat * 4.0
         total_duration = seconds_per_bar * target_bars
         total_samples = int(total_duration * self.sr)
 
-        # 2. Quantize source sound hits
-        quantized_original, hits = quantize_and_loop_source(
-            waveform, sr=self.sr, bpm=bpm, total_bars=target_bars, seed=seed
-        )
+        # 2. Musical Key & Scale
+        # Pick root note varied by seed or predictions
+        root_choices = ["D", "G", "A", "C", "F", "E", "B"]
+        key = rng.choice(root_choices) if seed % 2 == 0 else str(predictions.get("predicted_key", "D"))
+        scale_type = rng.choice(g_cfg["scale_types"])
 
-        # 3. Sound Sampler
-        sampler = EnvironmentalSoundSampler(waveform, sr=self.sr)
-
-        # 4. Musical Scales & Progression Selection
-        # Select scale pitches across 2 octaves
-        melody_scale = get_scale_pitches(root_note=key, scale_type=scale_type, base_octave=4)
+        melody_scale = get_scale_pitches(root_note=key, scale_type=scale_type, base_octave=g_cfg["melody_octave"])
         bass_scale = get_scale_pitches(root_note=key, scale_type=scale_type, base_octave=2)
 
-        # Select a chord progression for this seed
-        prog_choices = SCALE_PROGRESSIONS.get(scale_type, SCALE_PROGRESSIONS["minor"])
-        progression = rng.choice(prog_choices)  # list of 4 chords: [(scale_deg, label), ...]
+        # 3. Sound-to-Instrument Sampler on the user's audio
+        sampler = EnvironmentalSoundSampler(waveform, sr=self.sr)
 
-        # Select a drum groove style for this seed
-        drum_style = rng.choice(DRUM_STYLES)
+        # 4. Rhythmic Grooving of the Original Recording
+        quantized_original = extract_and_groove_slices(
+            waveform, sr=self.sr, bpm=bpm, total_bars=target_bars, genre=genre, seed=seed
+        )
 
         track_melody = np.zeros(total_samples, dtype=np.float32)
         track_bass = np.zeros(total_samples, dtype=np.float32)
         track_drums = np.zeros(total_samples, dtype=np.float32)
 
-        # 5. GENERATIVE MELODIC PHRASING (Varies by seed & neural grid)
-        # Select melodic contour type for this seed:
-        contour_type = rng.choice(["syncopated_riff", "arpeggio_cascade", "call_and_response", "ambient_pulses"])
-
+        # 5. GENRE-SPECIFIC MELODIES & RIFFS
         melody_events = []
-
-        # Generate melody across bars (starts at Bar 1 or 2 depending on seed)
-        melody_start_bar = rng.choice([1, 2])
+        melody_start_bar = 0 if genre in ("synthwave", "ambient") else 1
 
         for bar in range(melody_start_bar, target_bars):
-            chord_deg, chord_label = progression[bar % len(progression)]
-            # Root note of current chord in melody scale
-            root_idx = chord_deg % len(melody_scale)
+            bar_start = bar * seconds_per_bar
 
-            # Available chord tones: Root, 3rd, 5th, 7th, 9th
-            chord_tones = [
-                melody_scale[root_idx % len(melody_scale)],
-                melody_scale[(root_idx + 2) % len(melody_scale)],
-                melody_scale[(root_idx + 4) % len(melody_scale)],
-                melody_scale[(root_idx + 6) % len(melody_scale)],
-                melody_scale[(root_idx + 7) % len(melody_scale)],
-            ]
+            if genre == "synthwave":
+                # Rapid 16th-note arpeggiator (retro electro)
+                arp_notes = [melody_scale[0], melody_scale[2 % len(melody_scale)], melody_scale[4 % len(melody_scale)], melody_scale[7 % len(melody_scale)]]
+                for s in range(8):  # 8th note pulses
+                    p = arp_notes[s % len(arp_notes)]
+                    melody_events.append({"bar": bar, "beat": s * 0.5, "pitch": p, "dur": 0.18})
 
-            # Use neural rhythm probabilities for this bar to bias hit positions
-            bar_probs = rhythm_probs[bar % len(rhythm_probs)]
+            elif genre == "house":
+                # Staccato piano / organ chords on syncopated upbeats
+                chord_pitches = [melody_scale[0], melody_scale[2 % len(melody_scale)], melody_scale[4 % len(melody_scale)]]
+                for beat in [0.75, 1.75, 2.75, 3.5]:
+                    for p in chord_pitches:
+                        melody_events.append({"bar": bar, "beat": beat, "pitch": p, "dur": 0.22})
 
-            if contour_type == "syncopated_riff":
-                # 3 to 5 notes per bar on syncopated 16th steps
-                possible_steps = [0, 2, 3, 6, 8, 10, 11, 14]
-                num_notes = rng.randint(3, 5)
-                chosen_steps = sorted(rng.sample(possible_steps, num_notes))
-                for s in chosen_steps:
-                    p = rng.choice(chord_tones)
-                    dur = rng.choice([0.2, 0.35, 0.5])
-                    melody_events.append({"bar": bar, "beat": s / 4.0, "pitch": p, "dur": dur})
+            elif genre == "trap":
+                # Eerie high staccato bell melody
+                high_notes = [melody_scale[4 % len(melody_scale)], melody_scale[3 % len(melody_scale)], melody_scale[2 % len(melody_scale)], melody_scale[0]]
+                for idx, b in enumerate([0.5, 1.5, 2.75, 3.25]):
+                    p = high_notes[idx % len(high_notes)]
+                    melody_events.append({"bar": bar, "beat": b, "pitch": p, "dur": 0.25})
 
-            elif contour_type == "arpeggio_cascade":
-                # Flowing ascending or descending arpeggio
-                step_offsets = [0, 1, 2, 3] if bar % 2 == 0 else [0, 2, 4, 6]
-                for idx, s in enumerate(step_offsets):
-                    p = chord_tones[idx % len(chord_tones)]
-                    melody_events.append({"bar": bar, "beat": s * 0.5, "pitch": p, "dur": 0.28})
+            elif genre == "afrobeat":
+                # Playful, syncopated pentatonic bounce
+                afro_beats = [0.0, 0.75, 1.5, 2.25]
+                for idx, b in enumerate(afro_beats):
+                    p = melody_scale[(idx * 2) % len(melody_scale)]
+                    melody_events.append({"bar": bar, "beat": b, "pitch": p, "dur": 0.3})
 
-            elif contour_type == "call_and_response":
-                # Play on beats 0 & 2 in odd bars, answer on beats 1.5 & 3 in even bars
-                if bar % 2 == 1:
-                    melody_events.append({"bar": bar, "beat": 0.0, "pitch": chord_tones[0], "dur": 0.4})
-                    melody_events.append({"bar": bar, "beat": 2.0, "pitch": chord_tones[2], "dur": 0.35})
-                    if rng.random() > 0.4:
-                        melody_events.append({"bar": bar, "beat": 3.0, "pitch": chord_tones[1], "dur": 0.25})
+            elif genre == "ambient":
+                # Long spatial bell tones with breathing room
+                if bar % 2 == 0:
+                    melody_events.append({"bar": bar, "beat": 0.0, "pitch": melody_scale[0], "dur": 1.2})
+                    melody_events.append({"bar": bar, "beat": 2.5, "pitch": melody_scale[4 % len(melody_scale)], "dur": 0.9})
                 else:
-                    melody_events.append({"bar": bar, "beat": 1.5, "pitch": chord_tones[3], "dur": 0.3})
-                    melody_events.append({"bar": bar, "beat": 2.5, "pitch": chord_tones[1], "dur": 0.3})
-                    melody_events.append({"bar": bar, "beat": 3.5, "pitch": chord_tones[0], "dur": 0.45})
+                    melody_events.append({"bar": bar, "beat": 1.5, "pitch": melody_scale[2 % len(melody_scale)], "dur": 1.0})
 
-            else:  # ambient_pulses
-                # Long held note on downbeat + light syncopated echo
-                melody_events.append({"bar": bar, "beat": 0.0, "pitch": chord_tones[0], "dur": 0.65})
-                melody_events.append({"bar": bar, "beat": 2.5, "pitch": chord_tones[2], "dur": 0.45})
+            else:  # lofi hip-hop
+                # Jazzy 3-note melodic motif on beats 0, 1.5, 3
+                if bar % 2 == 1:
+                    melody_events.append({"bar": bar, "beat": 0.0, "pitch": melody_scale[0], "dur": 0.45})
+                    melody_events.append({"bar": bar, "beat": 1.5, "pitch": melody_scale[2 % len(melody_scale)], "dur": 0.35})
+                    melody_events.append({"bar": bar, "beat": 3.0, "pitch": melody_scale[4 % len(melody_scale)], "dur": 0.5})
+                else:
+                    melody_events.append({"bar": bar, "beat": 1.0, "pitch": melody_scale[3 % len(melody_scale)], "dur": 0.4})
+                    melody_events.append({"bar": bar, "beat": 2.5, "pitch": melody_scale[0], "dur": 0.5})
 
-        # Render Melody Notes with sampler
         for evt in melody_events:
             bar_start = evt["bar"] * seconds_per_bar
             note_time = bar_start + evt["beat"] * seconds_per_beat
@@ -238,48 +291,53 @@ class IntelligentComposer:
             if start_s >= total_samples:
                 continue
 
-            note_audio = sampler.render_tuned_note(
-                pitch=evt["pitch"], base_pitch=60, duration=evt["dur"]
-            )
+            note_audio = sampler.render_tuned_note(pitch=evt["pitch"], base_pitch=60, duration=evt["dur"])
             note_audio = butter_highpass_filter(note_audio, cutoff=450.0, sr=self.sr)
+            note_audio = butter_lowpass_filter(note_audio, cutoff=g_cfg["melody_cutoff"], sr=self.sr)
 
             end_s = min(start_s + len(note_audio), total_samples)
-            track_melody[start_s:end_s] += note_audio[:end_s - start_s] * 0.70
+            track_melody[start_s:end_s] += note_audio[:end_s - start_s] * 0.72
 
-        # 6. GENERATIVE BASSLINES (Matched to chord progression & style)
-        bass_start_bar = rng.choice([2, 3])
+        # 6. GENRE-SPECIFIC BASSLINES
         bass_events = []
-
-        bass_rhythm_style = rng.choice(["root_fifth_bounce", "walking_groove", "sustained_sub", "offbeat_dub"])
+        bass_start_bar = 1 if genre in ("synthwave", "house") else 2
 
         for bar in range(bass_start_bar, target_bars):
-            chord_deg, _ = progression[bar % len(progression)]
-            bass_root = bass_scale[chord_deg % len(bass_scale)]
-            bass_fifth = bass_scale[(chord_deg + 4) % len(bass_scale)]
+            root_p = bass_scale[0]
+            fourth_p = bass_scale[3 % len(bass_scale)]
+            fifth_p = bass_scale[4 % len(bass_scale)]
 
-            if bass_rhythm_style == "root_fifth_bounce":
-                # Downbeat root + beat 2.5 or 3 fifth
-                bass_events.append({"bar": bar, "beat": 0.0, "pitch": bass_root, "dur": 0.6})
-                bass_events.append({"bar": bar, "beat": 2.5, "pitch": bass_fifth, "dur": 0.45})
-                if rng.random() > 0.5:
-                    bass_events.append({"bar": bar, "beat": 3.5, "pitch": bass_root, "dur": 0.3})
+            if genre == "synthwave":
+                # Driving straight 8th note bassline
+                for b_step in [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5]:
+                    p = root_p if bar % 2 == 0 else fourth_p
+                    bass_events.append({"bar": bar, "beat": b_step, "pitch": p, "dur": 0.35})
 
-            elif bass_rhythm_style == "walking_groove":
-                # Walking bass passing notes
-                bass_events.append({"bar": bar, "beat": 0.0, "pitch": bass_root, "dur": 0.4})
-                bass_events.append({"bar": bar, "beat": 1.0, "pitch": bass_root + 2, "dur": 0.4})
-                bass_events.append({"bar": bar, "beat": 2.0, "pitch": bass_fifth, "dur": 0.4})
-                bass_events.append({"bar": bar, "beat": 3.0, "pitch": bass_root, "dur": 0.4})
+            elif genre == "house":
+                # Offbeat house bass (pumps between the kick drums: 0.5, 1.5, 2.5, 3.5)
+                for b_step in [0.5, 1.5, 2.5, 3.5]:
+                    bass_events.append({"bar": bar, "beat": b_step, "pitch": root_p, "dur": 0.35})
 
-            elif bass_rhythm_style == "offbeat_dub":
-                # Drops on offbeats: 0.5 and 2.5
-                bass_events.append({"bar": bar, "beat": 0.5, "pitch": bass_root, "dur": 0.5})
-                bass_events.append({"bar": bar, "beat": 2.5, "pitch": bass_fifth, "dur": 0.5})
+            elif genre == "trap":
+                # Deep 808 sub hits with glide duration
+                bass_events.append({"bar": bar, "beat": 0.0, "pitch": root_p, "dur": 1.2})
+                if bar % 2 == 1:
+                    bass_events.append({"bar": bar, "beat": 2.5, "pitch": fifth_p, "dur": 0.9})
 
-            else:  # sustained_sub
-                bass_events.append({"bar": bar, "beat": 0.0, "pitch": bass_root, "dur": 1.1})
-                if rng.random() > 0.4:
-                    bass_events.append({"bar": bar, "beat": 2.0, "pitch": bass_fifth, "dur": 0.8})
+            elif genre == "afrobeat":
+                # Bouncy syncopated log bass
+                bass_events.append({"bar": bar, "beat": 0.0, "pitch": root_p, "dur": 0.4})
+                bass_events.append({"bar": bar, "beat": 1.25, "pitch": fifth_p, "dur": 0.4})
+                bass_events.append({"bar": bar, "beat": 2.5, "pitch": root_p, "dur": 0.4})
+
+            elif genre == "ambient":
+                # Sub-drone
+                bass_events.append({"bar": bar, "beat": 0.0, "pitch": root_p, "dur": 2.5})
+
+            else:  # lofi
+                # Lazy root-fifth bounce
+                bass_events.append({"bar": bar, "beat": 0.0, "pitch": root_p, "dur": 0.6})
+                bass_events.append({"bar": bar, "beat": 2.5, "pitch": fifth_p, "dur": 0.5})
 
         for evt in bass_events:
             bar_start = evt["bar"] * seconds_per_bar
@@ -288,64 +346,77 @@ class IntelligentComposer:
             if start_s >= total_samples:
                 continue
 
-            bass_audio = sampler.render_bass_hit(
-                pitch=evt["pitch"], base_pitch=60, duration=evt["dur"]
-            )
-            bass_audio = butter_lowpass_filter(bass_audio, cutoff=200.0, sr=self.sr)
+            bass_audio = sampler.render_bass_hit(pitch=evt["pitch"], base_pitch=60, duration=evt["dur"])
+            bass_audio = butter_lowpass_filter(bass_audio, cutoff=g_cfg["bass_cutoff"], sr=self.sr)
 
             end_s = min(start_s + len(bass_audio), total_samples)
             track_bass[start_s:end_s] += bass_audio[:end_s - start_s] * 0.95
 
-        # 7. GENERATIVE DRUM POCKET (Varied kick/snare/hihat rhythms by style)
+        # 7. GENRE-SPECIFIC DRUM PATTERNS
         drum_events = []
-        drum_start_bar = rng.choice([2, 3])
+        drum_start = 2 if genre != "ambient" else 4
 
-        # Hi-Hat styles: straight 8ths, swing 16ths, or triplet offbeats
-        hihat_grid = rng.choice([
-            [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5],             # straight 8ths
-            [0.5, 1.5, 2.5, 3.5],                                  # sparse offbeats
-            [0.0, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 2.25, 2.5, 3.0] # syncopated roll
-        ])
+        for bar in range(drum_start, target_bars):
+            if genre == "house":
+                # 4-on-the-floor kick
+                for b in [0.0, 1.0, 2.0, 3.0]:
+                    drum_events.append({"bar": bar, "beat": b, "type": "kick"})
+                # Snare/Clap on 1 & 3
+                drum_events.append({"bar": bar, "beat": 1.0, "type": "snare"})
+                drum_events.append({"bar": bar, "beat": 3.0, "type": "snare"})
+                # Open Hi-Hat on every offbeat
+                for b in [0.5, 1.5, 2.5, 3.5]:
+                    drum_events.append({"bar": bar, "beat": b, "type": "hihat"})
 
-        for bar in range(drum_start_bar, target_bars):
-            is_climax = bar >= (target_bars - 4)
+            elif genre == "trap":
+                # Kick on 0 and syncopated pickup
+                drum_events.append({"bar": bar, "beat": 0.0, "type": "kick"})
+                drum_events.append({"bar": bar, "beat": 2.5, "type": "kick"})
+                # Snare strictly on beat 2.0 (half-time!)
+                drum_events.append({"bar": bar, "beat": 2.0, "type": "snare"})
+                # Rapid rolling Hi-Hats including fast triplets
+                for b in [0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.33, 2.66, 3.0, 3.25, 3.5]:
+                    drum_events.append({"bar": bar, "beat": b, "type": "hihat"})
 
-            # Hi-Hats
-            for beat in hihat_grid:
-                drum_events.append({"bar": bar, "beat": beat, "type": "hihat"})
+            elif genre == "synthwave":
+                # Kick on 0 and 2
+                drum_events.append({"bar": bar, "beat": 0.0, "type": "kick"})
+                drum_events.append({"bar": bar, "beat": 2.0, "type": "kick"})
+                # Big gated Snare on 1 and 3
+                drum_events.append({"bar": bar, "beat": 1.0, "type": "snare"})
+                drum_events.append({"bar": bar, "beat": 3.0, "type": "snare"})
+                # Driving 16th hats
+                for b in [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5]:
+                    drum_events.append({"bar": bar, "beat": b, "type": "hihat"})
 
-            if is_climax:
-                # Kick & Snare placement determined by drum_style:
-                if drum_style == "four_on_floor":
-                    # Kicks on every beat 0, 1, 2, 3
-                    for b in [0.0, 1.0, 2.0, 3.0]:
-                        drum_events.append({"bar": bar, "beat": b, "type": "kick"})
-                    # Claps/Snares on 1 & 3
-                    drum_events.append({"bar": bar, "beat": 1.0, "type": "snare"})
-                    drum_events.append({"bar": bar, "beat": 3.0, "type": "snare"})
+            elif genre == "afrobeat":
+                # Polyrhythmic syncopated kick
+                drum_events.append({"bar": bar, "beat": 0.0, "type": "kick"})
+                drum_events.append({"bar": bar, "beat": 1.5, "type": "kick"})
+                drum_events.append({"bar": bar, "beat": 2.25, "type": "kick"})
+                drum_events.append({"bar": bar, "beat": 3.0, "type": "snare"})
+                for b in [0.0, 0.75, 1.5, 2.25, 3.0]:
+                    drum_events.append({"bar": bar, "beat": b, "type": "hihat"})
 
-                elif drum_style == "trap_half":
-                    # Kick on 0, 1.75; Snare on 2.0
-                    drum_events.append({"bar": bar, "beat": 0.0, "type": "kick"})
-                    drum_events.append({"bar": bar, "beat": 1.75, "type": "kick"})
-                    if rng.random() > 0.4:
-                        drum_events.append({"bar": bar, "beat": 2.5, "type": "kick"})
+            elif genre == "ambient":
+                # Ultra sparse
+                if bar % 2 == 1:
                     drum_events.append({"bar": bar, "beat": 2.0, "type": "snare"})
+                drum_events.append({"bar": bar, "beat": 0.0, "type": "hihat"})
 
-                elif drum_style == "afro_syncopated":
-                    # Polyrhythmic kick
-                    drum_events.append({"bar": bar, "beat": 0.0, "type": "kick"})
-                    drum_events.append({"bar": bar, "beat": 1.5, "type": "kick"})
-                    drum_events.append({"bar": bar, "beat": 2.25, "type": "kick"})
-                    drum_events.append({"bar": bar, "beat": 3.0, "type": "snare"})
-
-                else:  # boom_bap / lofi_swing
-                    drum_events.append({"bar": bar, "beat": 0.0, "type": "kick"})
+            else:  # lofi
+                # Boom-bap kick
+                drum_events.append({"bar": bar, "beat": 0.0, "type": "kick"})
+                if bar % 2 == 1:
+                    drum_events.append({"bar": bar, "beat": 2.5, "type": "kick"})
+                else:
                     drum_events.append({"bar": bar, "beat": 2.0, "type": "kick"})
-                    if rng.random() > 0.5:
-                        drum_events.append({"bar": bar, "beat": 2.75, "type": "kick"})
-                    drum_events.append({"bar": bar, "beat": 1.0, "type": "snare"})
-                    drum_events.append({"bar": bar, "beat": 3.0, "type": "snare"})
+                # Rim snare on 1 & 3
+                drum_events.append({"bar": bar, "beat": 1.0, "type": "snare"})
+                drum_events.append({"bar": bar, "beat": 3.0, "type": "snare"})
+                # Swung hi-hats
+                for b in [0.0, 0.5 + 0.04, 1.0, 1.5 + 0.04, 2.0, 2.5 + 0.04, 3.0, 3.5 + 0.04]:
+                    drum_events.append({"bar": bar, "beat": b, "type": "hihat"})
 
         for evt in drum_events:
             bar_start = evt["bar"] * seconds_per_bar
@@ -355,16 +426,16 @@ class IntelligentComposer:
                 continue
 
             if evt["type"] == "kick":
-                drum_audio = sampler.render_kick(duration=0.3) * 0.90
+                drum_audio = sampler.render_kick(duration=0.32) * 0.92
             elif evt["type"] == "snare":
-                drum_audio = sampler.render_snare(duration=0.25) * 0.80
+                drum_audio = sampler.render_snare(duration=0.26) * 0.85
             else:
-                drum_audio = sampler.render_hihat(duration=0.07) * 0.45
+                drum_audio = sampler.render_hihat(duration=0.08) * 0.45
 
             end_s = min(start_s + len(drum_audio), total_samples)
             track_drums[start_s:end_s] += drum_audio[:end_s - start_s]
 
-        # 8. Dynamic Mixdown
+        # 8. Master Mixdown
         rendered_tracks = {
             "original": quantized_original,
             "melody": track_melody,
@@ -372,11 +443,13 @@ class IntelligentComposer:
             "drums": track_drums,
         }
 
+        # Genre-specific mixing balances
+        orig_gain = 0.55 if genre in ("house", "trap") else 0.85
         gains = {
-            "original": 0.85,
-            "melody": 0.72,
+            "original": orig_gain,
+            "melody": 0.75,
             "bass": 0.95,
-            "drums": 0.82,
+            "drums": 0.88,
         }
 
         final_mix, adjusted_stems = mix_tracks(rendered_tracks, custom_gains=gains, master_volume=0.92)
@@ -388,10 +461,9 @@ class IntelligentComposer:
             "bpm": bpm,
             "key": key,
             "scale": scale_type,
+            "genre": genre,
+            "genre_desc": g_cfg["description"],
             "seed": seed,
-            "drum_style": drum_style,
-            "contour_type": contour_type,
-            "bass_style": bass_rhythm_style,
             "total_bars": target_bars,
             "seconds_per_bar": seconds_per_bar,
         }
