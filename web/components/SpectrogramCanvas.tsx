@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 
 interface Props {
   matrix?: number[][];
@@ -7,12 +7,16 @@ interface Props {
   isEmpty?: boolean;
   emptyText?: string;
   isMini?: boolean;
+  duration?: number;
+  currentTime?: number;
+  isPlaying?: boolean;
+  onSeek?: (seekTime: number) => void;
 }
 
-// Real Heatmap Palette: 0.0 (near black) -> deep purple -> crimson -> neon orange -> bright yellow/white
+// Heatmap: 0.0 (dark purple/black) -> crimson -> neon orange -> bright yellow/white
 function getAudioColor(val: number): string {
   const v = Math.max(0, Math.min(1, val));
-  if (v < 0.05) return '#090a10';
+  if (v < 0.04) return '#090a12';
   if (v < 0.28) {
     const t = v / 0.28;
     const r = Math.floor(18 + t * 85);
@@ -40,16 +44,38 @@ function getAudioColor(val: number): string {
   }
 }
 
+// Generate realistic idle/empty spectrogram data for visual completeness
+function generateIdleSpectrogram(bins = 40, frames = 120): number[][] {
+  const data: number[][] = [];
+  for (let b = 0; b < bins; b++) {
+    const row: number[] = [];
+    const freqFactor = Math.exp(-b / 14);
+    for (let f = 0; f < frames; f++) {
+      const noise = (Math.sin(f * 0.18 + b * 0.4) + Math.cos(f * 0.09 - b * 0.2)) * 0.12;
+      const pulse = (f > 30 && f < 45) || (f > 75 && f < 95) ? 0.35 * freqFactor : 0.05 * freqFactor;
+      row.push(Math.max(0.02, Math.min(0.7, pulse + noise * freqFactor + 0.05)));
+    }
+    data.push(row);
+  }
+  return data;
+}
+
 export default function SpectrogramCanvas({
   matrix,
   width = 600,
-  height = 240,
+  height = 200,
   isEmpty = false,
-  emptyText = 'Empty Spectrogram',
+  emptyText,
   isMini = false,
+  duration = 0,
+  currentTime = 0,
+  isPlaying = false,
+  onSeek,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [hoverX, setHoverX] = useState<number | null>(null);
 
+  // Render spectrogram to canvas
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -58,63 +84,109 @@ export default function SpectrogramCanvas({
 
     ctx.clearRect(0, 0, width, height);
 
+    let activeMatrix = matrix;
     if (isEmpty || !matrix || matrix.length === 0) {
-      // Neural grid placeholder
-      ctx.fillStyle = '#0b0c13';
-      ctx.fillRect(0, 0, width, height);
-
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
-      ctx.lineWidth = 1;
-      const stepX = isMini ? 25 : 50;
-      const stepY = isMini ? 15 : 30;
-
-      for (let x = 0; x < width; x += stepX) {
-        ctx.beginPath();
-        ctx.moveTo(x, 0);
-        ctx.lineTo(x, height);
-        ctx.stroke();
-      }
-      for (let y = 0; y < height; y += stepY) {
-        ctx.beginPath();
-        ctx.moveTo(0, y);
-        ctx.lineTo(width, y);
-        ctx.stroke();
-      }
-
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.35)';
-      ctx.font = isMini ? 'italic 12px serif' : 'italic 18px serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(emptyText, width / 2, height / 2);
-      return;
+      // Use synthesized ambient spectrogram pattern matching the Excalidraw wireframe
+      activeMatrix = generateIdleSpectrogram(isMini ? 24 : 48, isMini ? 80 : 160);
     }
 
-    const numFreqBins = matrix.length;
-    const numTimeFrames = matrix[0]?.length || 0;
+    const numFreqBins = activeMatrix.length;
+    const numTimeFrames = activeMatrix[0]?.length || 0;
     if (numTimeFrames === 0) return;
 
     const cellW = width / numTimeFrames;
     const cellH = height / numFreqBins;
 
-    // Draw real STFT spectrogram bottom-up
+    // Draw spectrogram bottom-up
     for (let f = 0; f < numFreqBins; f++) {
-      const row = matrix[f];
+      const row = activeMatrix[f];
       const y = height - (f + 1) * cellH;
 
       for (let t = 0; t < numTimeFrames; t++) {
         const val = row[t] || 0;
-        ctx.fillStyle = getAudioColor(val);
+        // In empty state, slightly dim the ambient spectrogram
+        const displayVal = isEmpty ? val * 0.6 : val;
+        ctx.fillStyle = getAudioColor(displayVal);
         ctx.fillRect(t * cellW, y, cellW + 0.5, cellH + 0.5);
       }
     }
-  }, [matrix, width, height, isEmpty, emptyText, isMini]);
+
+    // If empty text specified, render clean serif label over the ambient spectrogram
+    if (isEmpty && emptyText) {
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+      ctx.fillRect(0, height / 2 - 20, width, 40);
+
+      ctx.fillStyle = '#f1f5f9';
+      ctx.font = isMini ? 'italic 13px serif' : 'italic 20px serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(emptyText, width / 2, height / 2);
+    }
+
+    // Draw Playhead line if playing or currentTime > 0
+    if (duration > 0 && currentTime >= 0) {
+      const playX = (currentTime / duration) * width;
+      ctx.beginPath();
+      ctx.moveTo(playX, 0);
+      ctx.lineTo(playX, height);
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = '#38bdf8';
+      ctx.shadowColor = '#0284c7';
+      ctx.shadowBlur = 6;
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+    }
+
+    // Draw Hover seek line
+    if (hoverX !== null && !isEmpty) {
+      ctx.beginPath();
+      ctx.moveTo(hoverX, 0);
+      ctx.lineTo(hoverX, height);
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+      ctx.setLineDash([3, 3]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }, [matrix, width, height, isEmpty, emptyText, isMini, duration, currentTime, isPlaying, hoverX]);
+
+  const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (isEmpty || !onSeek) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    setHoverX(Math.max(0, Math.min(width, (x / rect.width) * width)));
+  };
+
+  const handleMouseLeave = () => {
+    setHoverX(null);
+  };
+
+  const handleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (isEmpty || !onSeek || duration <= 0) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const clickX = e.clientX - rect.left;
+    const fraction = Math.max(0, Math.min(1, clickX / rect.width));
+    onSeek(fraction * duration);
+  };
 
   return (
-    <canvas
-      ref={canvasRef}
-      width={width}
-      height={height}
-      className="w-full h-full rounded-lg object-cover"
-    />
+    <div className="relative w-full h-full group">
+      <canvas
+        ref={canvasRef}
+        width={width}
+        height={height}
+        onMouseMove={handleMouseMove}
+        onMouseLeave={handleMouseLeave}
+        onClick={handleClick}
+        className={`w-full h-full rounded object-cover ${
+          !isEmpty && onSeek ? 'cursor-pointer' : ''
+        }`}
+      />
+      {!isEmpty && onSeek && (
+        <div className="absolute bottom-1 right-2 opacity-0 group-hover:opacity-100 transition-opacity text-[10px] text-white/70 bg-black/60 px-1.5 py-0.5 rounded font-serif pointer-events-none">
+          click to seek
+        </div>
+      )}
+    </div>
   );
 }
