@@ -1,10 +1,25 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
-import Head from 'next/head';
-import { FaDice, FaCheck, FaPlay, FaPause, FaDownload } from 'react-icons/fa6';
-import SpectrogramCanvas from '@/components/SpectrogramCanvas';
-import { CharlieAudioManager } from '@/lib/audioManager';
+import React, {
+  useState,
+  useRef,
+  useEffect,
+  useCallback,
+  useLayoutEffect,
+} from "react";
+import Head from "next/head";
+import { FaDice, FaCheck, FaPlay, FaPause, FaDownload } from "react-icons/fa6";
+import SpectrogramCanvas from "@/components/SpectrogramCanvas";
+import { CharlieAudioManager } from "@/lib/audioManager";
 
-const GENRES = ['random', 'lofi', 'rnb', 'house', 'trap', 'synthwave', 'afrobeat', 'ambient'];
+const GENRES = [
+  "random",
+  "lofi",
+  "rnb",
+  "house",
+  "trap",
+  "synthwave",
+  "afrobeat",
+  "ambient",
+];
 
 interface StemData {
   audioUrl: string;
@@ -13,20 +28,22 @@ interface StemData {
 }
 
 export default function Home() {
-  const [fileName, setFileName] = useState<string>('');
-  const [filePath, setFilePath] = useState<string>('');
-  const [audioUrl, setAudioUrl] = useState<string>('');
+  const [fileName, setFileName] = useState<string>("");
+  const [filePath, setFilePath] = useState<string>("");
+  const [audioUrl, setAudioUrl] = useState<string>("");
   const [analysis, setAnalysis] = useState<any>(null);
 
   // Conditioning config
   const [musical, setMusical] = useState<boolean>(true);
-  const [genre, setGenre] = useState<string>('random');
-  const [seed, setSeed] = useState<number>(() => Math.floor(1000 + Math.random() * 900000));
+  const [genre, setGenre] = useState<string>("random");
+  const [seed, setSeed] = useState<number>(() =>
+    Math.floor(1000 + Math.random() * 900000),
+  );
 
   // Generation state
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
   const [stems, setStems] = useState<Record<string, StemData>>({});
-  const [masterUrl, setMasterUrl] = useState<string>('');
+  const [masterUrl, setMasterUrl] = useState<string>("");
   const [masterSpectrogram, setMasterSpectrogram] = useState<number[][]>([]);
   const [masterDuration, setMasterDuration] = useState<number>(14);
 
@@ -46,6 +63,23 @@ export default function Home() {
   const [currentTime, setCurrentTime] = useState<number>(0);
   const [activeDuration, setActiveDuration] = useState<number>(0);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
+
+  // DOM Refs for pixel-perfect dynamic SVG neural strings
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const inputCardRef = useRef<HTMLDivElement | null>(null);
+  const generateBtnRef = useRef<HTMLButtonElement | null>(null);
+  const stemCardRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const masterCardRef = useRef<HTMLDivElement | null>(null);
+
+  const [svgPaths, setSvgPaths] = useState<{
+    inputToGen: string;
+    genToStems: string[];
+    stemsToMaster: string[];
+  }>({
+    inputToGen: "",
+    genToStems: [],
+    stemsToMaster: [],
+  });
 
   // Initialize AudioManager once
   useEffect(() => {
@@ -67,39 +101,156 @@ export default function Home() {
     setActiveTrackId(null);
   }, []);
 
+  // Compute pixel-accurate dynamic SVG connection paths
+  const updateNeuralPaths = useCallback(() => {
+    if (
+      !containerRef.current ||
+      !inputCardRef.current ||
+      !generateBtnRef.current ||
+      !masterCardRef.current
+    ) {
+      return;
+    }
+
+    const cRect = containerRef.current.getBoundingClientRect();
+    const getL = (el: HTMLElement) => {
+      const r = el.getBoundingClientRect();
+      return { x: r.left - cRect.left, y: r.top + r.height / 2 - cRect.top };
+    };
+    const getR = (el: HTMLElement) => {
+      const r = el.getBoundingClientRect();
+      return { x: r.right - cRect.left, y: r.top + r.height / 2 - cRect.top };
+    };
+
+    const inR = getR(inputCardRef.current);
+    const genL = getL(generateBtnRef.current);
+    const genR = getR(generateBtnRef.current);
+    const masL = getL(masterCardRef.current);
+
+    // Path 1: Input to Generate
+    const dx1 = Math.max(30, (genL.x - inR.x) * 0.5);
+    const inputToGen = `M ${inR.x} ${inR.y} C ${inR.x + dx1} ${inR.y}, ${genL.x - dx1} ${genL.y}, ${genL.x} ${genL.y}`;
+
+    // Paths 2: Generate to each Stem
+    const genToStems: string[] = [];
+    const stemsToMaster: string[] = [];
+
+    stemCardRefs.current.forEach((stemEl) => {
+      if (!stemEl) return;
+      const sL = getL(stemEl);
+      const sR = getR(stemEl);
+
+      const dx2 = Math.max(25, (sL.x - genR.x) * 0.5);
+      genToStems.push(
+        `M ${genR.x} ${genR.y} C ${genR.x + dx2} ${genR.y}, ${sL.x - dx2} ${sL.y}, ${sL.x} ${sL.y}`,
+      );
+
+      const dx3 = Math.max(25, (masL.x - sR.x) * 0.5);
+      stemsToMaster.push(
+        `M ${sR.x} ${sR.y} C ${sR.x + dx3} ${sR.y}, ${masL.x - dx3} ${masL.y}, ${masL.x} ${masL.y}`,
+      );
+    });
+
+    setSvgPaths({ inputToGen, genToStems, stemsToMaster });
+  }, []);
+
+  // Update SVG strings on resize and state changes
+  useEffect(() => {
+    updateNeuralPaths();
+    window.addEventListener("resize", updateNeuralPaths);
+    const timer = setTimeout(updateNeuralPaths, 100);
+    return () => {
+      window.removeEventListener("resize", updateNeuralPaths);
+      clearTimeout(timer);
+    };
+  }, [updateNeuralPaths, filePath, stems, masterUrl]);
+
+  // RESET FUNCTION: Discard track & reset everything to random on clicking 'hey charlie'
+  const handleReset = () => {
+    audioManagerRef.current?.stop();
+    setFilePath("");
+    setFileName("");
+    setAudioUrl("");
+    setAnalysis(null);
+    setStems({});
+    setMasterUrl("");
+    setMasterSpectrogram([]);
+    setGenre("random");
+    setSeed(Math.floor(1000 + Math.random() * 900000));
+    setActiveTrackId(null);
+    setIsPlaying(false);
+    setCurrentTime(0);
+    setStemMutes({
+      original: true,
+      melody: true,
+      drums: true,
+      harmony: true,
+      chords: true,
+      bass: true,
+    });
+  };
+
   // Play / Pause / Seek Handler
-  const handlePlayOrSeek = async (trackId: string, url: string, knownDur: number, seekTime?: number) => {
+  const handlePlayOrSeek = async (
+    trackId: string,
+    url: string,
+    knownDur: number,
+    seekTime?: number,
+  ) => {
     const mgr = audioManagerRef.current;
     if (!mgr || !url) return;
 
-    // Toggle Pause if same track clicked without seek
     if (activeTrackId === trackId && seekTime === undefined) {
       if (isPlaying) {
         mgr.pause();
         setIsPlaying(false);
       } else {
-        // Resume from current paused time
-        if (trackId === 'master') {
-          await mgr.playMasterMix(stems, stemMutes, currentTime, masterUrl, handleTimeUpdate, handlePlaybackEnd);
+        if (trackId === "master") {
+          await mgr.playMasterMix(
+            stems,
+            stemMutes,
+            currentTime,
+            masterUrl,
+            handleTimeUpdate,
+            handlePlaybackEnd,
+          );
         } else {
-          await mgr.playSingle(trackId, url, currentTime, handleTimeUpdate, handlePlaybackEnd);
+          await mgr.playSingle(
+            trackId,
+            url,
+            currentTime,
+            handleTimeUpdate,
+            handlePlaybackEnd,
+          );
         }
         setIsPlaying(true);
       }
       return;
     }
 
-    // Play or seek
     const targetSeek = seekTime !== undefined ? seekTime : 0;
     setActiveTrackId(trackId);
     setCurrentTime(targetSeek);
     setActiveDuration(knownDur);
     setIsPlaying(true);
 
-    if (trackId === 'master') {
-      await mgr.playMasterMix(stems, stemMutes, targetSeek, masterUrl, handleTimeUpdate, handlePlaybackEnd);
+    if (trackId === "master") {
+      await mgr.playMasterMix(
+        stems,
+        stemMutes,
+        targetSeek,
+        masterUrl,
+        handleTimeUpdate,
+        handlePlaybackEnd,
+      );
     } else {
-      await mgr.playSingle(trackId, url, targetSeek, handleTimeUpdate, handlePlaybackEnd);
+      await mgr.playSingle(
+        trackId,
+        url,
+        targetSeek,
+        handleTimeUpdate,
+        handlePlaybackEnd,
+      );
     }
   };
 
@@ -108,7 +259,6 @@ export default function Home() {
     setStemMutes((prev) => {
       const nextState = !prev[stemKey];
       const updated = { ...prev, [stemKey]: nextState };
-      // Live update Web Audio gain without interrupting playback!
       audioManagerRef.current?.setStemEnabled(stemKey, nextState);
       return updated;
     });
@@ -123,14 +273,17 @@ export default function Home() {
 
     setFileName(file.name);
     setStems({});
-    setMasterUrl('');
+    setMasterUrl("");
     setMasterSpectrogram([]);
 
     const formData = new FormData();
-    formData.append('file', file);
+    formData.append("file", file);
 
     try {
-      const res = await fetch('/api/upload', { method: 'POST', body: formData });
+      const res = await fetch("/api/upload", {
+        method: "POST",
+        body: formData,
+      });
       const data = await res.json();
       if (data.success) {
         setFilePath(data.filePath);
@@ -138,7 +291,7 @@ export default function Home() {
         setAnalysis(data.analysis);
       }
     } catch (e) {
-      console.error('Upload error:', e);
+      console.error("Upload error:", e);
     }
   };
 
@@ -153,7 +306,7 @@ export default function Home() {
     setFilePath(name);
     setAudioUrl(`/api/audio?file=${encodeURIComponent(name)}`);
     setStems({});
-    setMasterUrl('');
+    setMasterUrl("");
     setMasterSpectrogram([]);
 
     try {
@@ -161,7 +314,7 @@ export default function Home() {
       const data = await res.json();
       setAnalysis(data);
     } catch (e) {
-      console.error('Analyze error:', e);
+      console.error("Analyze error:", e);
     }
   };
 
@@ -175,12 +328,12 @@ export default function Home() {
     setIsGenerating(true);
 
     try {
-      const res = await fetch('/api/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+      const res = await fetch("/api/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           filePath,
-          genre: genre === 'random' ? undefined : genre,
+          genre: genre === "random" ? undefined : genre,
           musical,
           seed,
           bars: 8,
@@ -195,7 +348,7 @@ export default function Home() {
         setStems(data.stems || {});
       }
     } catch (e) {
-      console.error('Generate error:', e);
+      console.error("Generate error:", e);
     } finally {
       setIsGenerating(false);
     }
@@ -211,28 +364,21 @@ export default function Home() {
         <link rel="icon" href="data:," />
       </Head>
 
-      {/* Header: strictly only 'hey charlie' has funky handwriting, everything else is sans-serif */}
-      <header className="mb-4 flex items-baseline justify-between max-w-7xl mx-auto w-full">
-        <h1 className="font-funky text-5xl md:text-6xl text-white select-none">
-          hey charlie
-        </h1>
-        <div className="flex items-center gap-2 text-xs font-medium">
-          <button
-            onClick={() => loadPreset('mug-beat.mp3')}
-            className="px-2.5 py-1 border border-white/20 rounded hover:border-white text-slate-300 transition cursor-pointer"
-          >
-            mug-beat.mp3
-          </button>
-          <button
-            onClick={() => loadPreset('sample-2.mp3')}
-            className="px-2.5 py-1 border border-white/20 rounded hover:border-white text-slate-300 transition cursor-pointer"
-          >
-            sample-2.mp3
-          </button>
-        </div>
+      {/* Header: Click 'hey charlie' to reset and discard project back to random */}
+      <header className="mb-4 flex items-center justify-between max-w-7xl mx-auto w-full">
+        <button
+          onClick={handleReset}
+          title="Click to reset project and randomize"
+          className="font-funky text-5xl md:text-6xl text-white select-none hover:text-cyan-300 transition-colors cursor-pointer text-left group"
+        >
+          <span>hey charlie</span>
+          <span className="text-xs font-sans text-slate-500 ml-3 opacity-0 group-hover:opacity-100 transition-opacity">
+            (click to reset)
+          </span>
+        </button>
       </header>
 
-      {/* Main Neural Workspace */}
+      {/* Main Neural Network Workspace */}
       <main className="flex-1 max-w-7xl mx-auto w-full flex items-center justify-center">
         {!filePath ? (
           /* STATE 1: Empty Wireframe State */
@@ -243,7 +389,9 @@ export default function Home() {
                 type="file"
                 accept="audio/*"
                 className="hidden"
-                onChange={(e) => e.target.files?.[0] && handleUpload(e.target.files[0])}
+                onChange={(e) =>
+                  e.target.files?.[0] && handleUpload(e.target.files[0])
+                }
               />
               <span className="text-xl font-medium text-white group-hover:scale-105 transition">
                 Upload MP3
@@ -253,15 +401,11 @@ export default function Home() {
             {/* Empty Spectrogram Box with Real Ambient Spectrogram Visual */}
             <div className="border border-white/40 rounded-xl p-3 flex flex-col justify-between min-h-[300px] relative bg-black/50">
               <div className="flex-1 w-full rounded overflow-hidden">
-                <SpectrogramCanvas
-                  isEmpty
-                  emptyText="Empty spectrogram"
-                  height={240}
-                />
+                <SpectrogramCanvas isEmpty height={240} />
               </div>
               <div className="flex justify-end p-2">
                 <button
-                  onClick={() => loadPreset('mug-beat.mp3')}
+                  onClick={() => loadPreset("mug-beat.mp3")}
                   title="Try preset mug-beat.mp3"
                   className="w-10 h-10 rounded-full border border-white/50 flex items-center justify-center text-sm hover:border-white transition cursor-pointer"
                 >
@@ -271,98 +415,76 @@ export default function Home() {
             </div>
           </div>
         ) : (
-          /* STATE 2: Active Neural Network Pipeline (Input -> 4 Stems -> Converging to Master) */
-          <div className="border border-white/30 rounded-2xl p-4 md:p-6 w-full bg-black/40 relative">
-            
-            {/* SVG Synaptic Neural Paths: Input -> Generate -> 4 Stems -> Master */}
+          /* STATE 2: Active Neural Network Pipeline */
+          <div
+            ref={containerRef}
+            className="border border-white/30 rounded-2xl p-4 md:p-6 w-full bg-black/40 relative overflow-hidden"
+          >
+            {/* DYNAMIC PIXEL-PERFECT SVG NEURAL STRINGS (Strictly BEHIND all cards at z-0) */}
             <svg
               className="absolute inset-0 w-full h-full pointer-events-none hidden xl:block z-0"
               xmlns="http://www.w3.org/2000/svg"
             >
-              {/* Line 1: Input Spectrogram -> Generate Button */}
-              <path
-                d="M 330 130 C 370 130, 390 220, 430 220"
-                fill="none"
-                stroke="rgba(255,255,255,0.3)"
-                strokeWidth="1.5"
-                strokeDasharray="4 3"
-              />
+              {/* String 1: Input to Generate */}
+              {svgPaths.inputToGen && (
+                <path
+                  d={svgPaths.inputToGen}
+                  fill="none"
+                  stroke="rgba(255, 255, 255, 0.28)"
+                  strokeWidth="1.5"
+                  strokeDasharray="4 3"
+                />
+              )}
 
-              {/* Fan-out: Generate -> 4 Stems */}
-              <path
-                d="M 525 220 C 560 220, 570 70, 605 70"
-                fill="none"
-                stroke="rgba(255,255,255,0.4)"
-                strokeWidth="1.5"
-              />
-              <path
-                d="M 525 220 C 560 220, 570 155, 605 155"
-                fill="none"
-                stroke="rgba(255,255,255,0.4)"
-                strokeWidth="1.5"
-              />
-              <path
-                d="M 525 220 C 560 220, 570 240, 605 240"
-                fill="none"
-                stroke="rgba(255,255,255,0.4)"
-                strokeWidth="1.5"
-              />
-              <path
-                d="M 525 220 C 560 220, 570 325, 605 325"
-                fill="none"
-                stroke="rgba(255,255,255,0.4)"
-                strokeWidth="1.5"
-              />
+              {/* Fan-out Strings: Generate to each of the 4 Stems */}
+              {svgPaths.genToStems.map((d, i) => (
+                <path
+                  key={`gen-stem-${i}`}
+                  d={d}
+                  fill="none"
+                  stroke="rgba(255, 255, 255, 0.35)"
+                  strokeWidth="1.5"
+                />
+              ))}
 
-              {/* Fan-in: 4 Stems Converging Back into 1 Master Node */}
-              <path
-                d="M 875 70 C 915 70, 925 200, 960 200"
-                fill="none"
-                stroke="rgba(16, 185, 129, 0.45)"
-                strokeWidth="1.5"
-              />
-              <path
-                d="M 875 155 C 915 155, 925 200, 960 200"
-                fill="none"
-                stroke="rgba(16, 185, 129, 0.45)"
-                strokeWidth="1.5"
-              />
-              <path
-                d="M 875 240 C 915 240, 925 200, 960 200"
-                fill="none"
-                stroke="rgba(16, 185, 129, 0.45)"
-                strokeWidth="1.5"
-              />
-              <path
-                d="M 875 325 C 915 325, 925 200, 960 200"
-                fill="none"
-                stroke="rgba(16, 185, 129, 0.45)"
-                strokeWidth="1.5"
-              />
+              {/* Fan-in Strings: 4 Stems Converging into Master */}
+              {svgPaths.stemsToMaster.map((d, i) => (
+                <path
+                  key={`stem-master-${i}`}
+                  d={d}
+                  fill="none"
+                  stroke="rgba(16, 185, 129, 0.45)"
+                  strokeWidth="1.5"
+                />
+              ))}
             </svg>
 
-            {/* Grid Layout: Input + Config (4 cols) | Generate (1.5 cols) | 4 Stems (3.5 cols) | Master (3 cols) */}
+            {/* Grid Layout: Input + Config (4 cols) | Generate (1.5 cols) | 4 Stems (3.5 cols) | Master + Info (3 cols) */}
             <div className="grid grid-cols-1 xl:grid-cols-12 gap-5 items-start relative z-10">
-              
-              {/* COLUMN 1: Input Spectrogram + Preview + Config */}
+              {/* COLUMN 1: Input Spectrogram + Preview + Sleek Clean Config */}
               <div className="xl:col-span-4 flex flex-col gap-2.5">
                 {/* Main Input Spectrogram Card */}
-                <div className="border border-white/60 rounded-xl p-2 bg-black/60 relative">
+                <div
+                  ref={inputCardRef}
+                  className="border border-white/60 rounded-xl p-2 bg-black/60 relative"
+                >
                   <div className="h-[170px] w-full rounded overflow-hidden">
                     <SpectrogramCanvas
                       matrix={analysis?.spectrogram}
                       isEmpty={!analysis?.spectrogram}
                       duration={inputDur}
-                      currentTime={activeTrackId === 'input' ? currentTime : 0}
-                      isPlaying={activeTrackId === 'input' && isPlaying}
-                      onSeek={(t) => handlePlayOrSeek('input', audioUrl, inputDur, t)}
+                      currentTime={activeTrackId === "input" ? currentTime : 0}
+                      isPlaying={activeTrackId === "input" && isPlaying}
+                      onSeek={(t) =>
+                        handlePlayOrSeek("input", audioUrl, inputDur, t)
+                      }
                     />
                   </div>
                 </div>
 
                 {/* File Name directly below spectrogram */}
                 <div className="text-center text-slate-300 text-xs font-medium truncate px-2">
-                  {fileName || 'audio.mp3'}
+                  {fileName || "audio.mp3"}
                 </div>
 
                 {/* Mini Preview Player Bar with Download Button */}
@@ -374,23 +496,35 @@ export default function Home() {
                       isMini
                       height={28}
                       duration={inputDur}
-                      currentTime={activeTrackId === 'input' ? currentTime : 0}
-                      isPlaying={activeTrackId === 'input' && isPlaying}
-                      onSeek={(t) => handlePlayOrSeek('input', audioUrl, inputDur, t)}
+                      currentTime={activeTrackId === "input" ? currentTime : 0}
+                      isPlaying={activeTrackId === "input" && isPlaying}
+                      onSeek={(t) =>
+                        handlePlayOrSeek("input", audioUrl, inputDur, t)
+                      }
                     />
                   </div>
                   <div className="flex items-center gap-1.5 shrink-0">
                     <button
-                      onClick={() => handlePlayOrSeek('input', audioUrl, inputDur)}
+                      onClick={() =>
+                        handlePlayOrSeek("input", audioUrl, inputDur)
+                      }
                       className="px-2.5 py-0.5 border border-white/40 rounded text-xs hover:border-white transition cursor-pointer flex items-center gap-1"
                     >
-                      {activeTrackId === 'input' && isPlaying ? <FaPause className="text-[10px]" /> : <FaPlay className="text-[10px]" />}
-                      <span>{activeTrackId === 'input' && isPlaying ? 'pause' : 'play'}</span>
+                      {activeTrackId === "input" && isPlaying ? (
+                        <FaPause className="text-[10px]" />
+                      ) : (
+                        <FaPlay className="text-[10px]" />
+                      )}
+                      <span>
+                        {activeTrackId === "input" && isPlaying
+                          ? "pause"
+                          : "play"}
+                      </span>
                     </button>
                     {audioUrl && (
                       <a
                         href={audioUrl}
-                        download={fileName || 'input_audio.mp3'}
+                        download={fileName || "input_audio.mp3"}
                         title="Download input sound"
                         className="p-1 border border-white/30 rounded hover:border-white text-slate-300 transition cursor-pointer flex items-center justify-center"
                       >
@@ -400,67 +534,81 @@ export default function Home() {
                   </div>
                 </div>
 
-                {/* Config Label */}
-                <div className="text-slate-400 text-xs mt-1">
-                  config
-                </div>
-
-                {/* Blue Outline Config Box */}
-                <div className="border-2 border-blue-500 rounded-xl p-2.5 flex flex-wrap items-center justify-between gap-2 bg-blue-950/10">
-                  {/* musical checkmark checkbox */}
-                  <button
-                    onClick={() => setMusical(!musical)}
-                    className="flex items-center gap-2 cursor-pointer select-none group"
-                  >
-                    <div
-                      className={`w-4 h-4 rounded border flex items-center justify-center transition ${
-                        musical ? 'bg-blue-600 border-blue-400 text-white' : 'border-slate-500 bg-transparent'
-                      }`}
+                {/* SLEEK, CLEAN & COOL CONFIG BOX */}
+                <div className="mt-1 rounded-xl border border-blue-500/40 bg-gradient-to-b from-blue-950/25 to-black/60 p-3 backdrop-blur-md shadow-[0_0_20px_rgba(30,58,138,0.15)] flex flex-col gap-2.5">
+                  {/* Top Row: musical toggle + seed box */}
+                  <div className="flex items-center justify-between">
+                    {/* musical toggle */}
+                    <button
+                      onClick={() => setMusical(!musical)}
+                      className="flex items-center gap-2 cursor-pointer select-none group"
                     >
-                      {musical && <FaCheck className="text-[10px]" />}
-                    </div>
-                    <span className="text-xs text-slate-200 group-hover:text-white font-medium">
-                      musical
-                    </span>
-                  </button>
-
-                  {/* genre dropdown with react-icons dice */}
-                  <div className="flex items-center gap-1.5 text-xs">
-                    <span className="text-slate-400 text-xs">genre:</span>
-                    <div className="relative flex items-center">
-                      <select
-                        value={genre}
-                        onChange={(e) => setGenre(e.target.value)}
-                        className="bg-black/80 border border-blue-400/50 rounded px-2 py-0.5 text-white text-xs focus:outline-none cursor-pointer"
+                      <div
+                        className={`w-4 h-4 rounded border flex items-center justify-center transition-all ${
+                          musical
+                            ? "bg-blue-600 border-blue-400 text-white shadow-[0_0_8px_rgba(59,130,246,0.6)]"
+                            : "border-slate-600 bg-black/40"
+                        }`}
                       >
-                        {GENRES.map((g) => (
-                          <option key={g} value={g}>
-                            {g === 'random' ? 'random' : g}
-                          </option>
-                        ))}
-                      </select>
-                      {genre === 'random' && (
-                        <FaDice className="ml-1 text-blue-400 text-xs pointer-events-none" />
-                      )}
+                        {musical && <FaCheck className="text-[9px]" />}
+                      </div>
+                      <span className="text-xs text-slate-200 group-hover:text-white font-medium tracking-wide">
+                        musical
+                      </span>
+                    </button>
+
+                    {/* Clean Seed Pill */}
+                    <div className="flex items-center gap-1.5 bg-black/60 border border-blue-500/30 rounded-lg px-2 py-0.5">
+                      <span className="text-[10px] uppercase tracking-wider text-blue-400 font-mono">
+                        seed
+                      </span>
+                      <input
+                        type="number"
+                        value={seed}
+                        onChange={(e) => setSeed(parseInt(e.target.value) || 1)}
+                        className="w-16 bg-transparent text-xs text-white text-right font-mono focus:outline-none"
+                      />
+                      <button
+                        onClick={() =>
+                          setSeed(Math.floor(1000 + Math.random() * 900000))
+                        }
+                        title="Roll random seed"
+                        className="text-blue-400 hover:text-white transition cursor-pointer p-0.5 active:rotate-180 duration-200"
+                      >
+                        <FaDice className="text-xs" />
+                      </button>
                     </div>
                   </div>
 
-                  {/* seed box with react-icons dice */}
-                  <div className="flex items-center gap-1 border border-blue-400/50 rounded px-1.5 py-0.5 bg-black/80">
-                    <span className="text-[11px] text-slate-400">seed:</span>
-                    <input
-                      type="number"
-                      value={seed}
-                      onChange={(e) => setSeed(parseInt(e.target.value) || 1)}
-                      className="w-14 bg-transparent text-xs text-white text-right focus:outline-none"
-                    />
-                    <button
-                      onClick={() => setSeed(Math.floor(1000 + Math.random() * 900000))}
-                      title="Randomize seed"
-                      className="text-slate-300 hover:text-cyan-300 transition cursor-pointer p-0.5"
-                    >
-                      <FaDice className="text-xs" />
-                    </button>
+                  {/* Bottom Row: Genre Pills Selector */}
+                  <div className="flex flex-col gap-1.5">
+                    <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-slate-400 font-mono">
+                      <span>genre</span>
+                      <span className="text-blue-400 font-semibold">
+                        {genre}
+                      </span>
+                    </div>
+                    <div className="flex flex-wrap gap-1">
+                      {GENRES.map((g) => {
+                        const isSelected = genre === g;
+                        return (
+                          <button
+                            key={g}
+                            onClick={() => setGenre(g)}
+                            className={`px-2 py-0.5 rounded text-[11px] font-medium transition cursor-pointer flex items-center gap-1 ${
+                              isSelected
+                                ? "bg-blue-600 text-white border border-blue-400 shadow-[0_0_8px_rgba(37,99,235,0.4)]"
+                                : "bg-black/40 text-slate-400 border border-white/10 hover:border-blue-400/50 hover:text-slate-200"
+                            }`}
+                          >
+                            {g === "random" && (
+                              <FaDice className="text-[9px]" />
+                            )}
+                            <span>{g}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
                   </div>
                 </div>
               </div>
@@ -468,13 +616,16 @@ export default function Home() {
               {/* COLUMN 2: Generate Button with Green Arrow */}
               <div className="xl:col-span-1 flex flex-col items-center justify-center my-auto py-8">
                 <button
+                  ref={generateBtnRef}
                   onClick={handleGenerate}
                   disabled={isGenerating}
                   className={`flex items-center gap-1.5 px-4 py-2.5 border border-white/60 rounded-xl text-sm font-medium transition cursor-pointer hover:border-emerald-400 hover:text-emerald-300 group bg-black/60 ${
-                    isGenerating ? 'opacity-50 animate-pulse' : 'hover:scale-105'
+                    isGenerating
+                      ? "opacity-50 animate-pulse"
+                      : "hover:scale-105"
                   }`}
                 >
-                  <span>{isGenerating ? 'generating' : 'generate'}</span>
+                  <span>{isGenerating ? "generating" : "generate"}</span>
                   <span className="text-xl text-emerald-400 font-bold group-hover:translate-x-1 transition-transform">
                     ➔
                   </span>
@@ -484,20 +635,34 @@ export default function Home() {
               {/* COLUMN 3: 4 Output Stems with On/Off Switch & Download Buttons */}
               <div className="xl:col-span-4 flex flex-col gap-2.5">
                 {[
-                  { id: 'original', label: 'original' },
-                  { id: 'melody', label: 'melody' },
-                  { id: 'drums', label: 'drums' },
-                  { id: stems['chords'] ? 'chords' : 'harmony', label: 'harmony' },
-                ].map((item) => {
-                  const stemKey = item.id === 'harmony' && stems['bass'] && !stems['chords'] ? 'bass' : item.id;
+                  { id: "original", label: "original" },
+                  { id: "melody", label: "melody" },
+                  { id: "drums", label: "drums" },
+                  {
+                    id: stems["chords"] ? "chords" : "harmony",
+                    label: "harmony",
+                  },
+                ].map((item, index) => {
+                  const stemKey =
+                    item.id === "harmony" && stems["bass"] && !stems["chords"]
+                      ? "bass"
+                      : item.id;
                   const stem = stems[stemKey];
-                  const hasStem = Boolean(stem && stem.spectrogram && stem.spectrogram.length > 0);
+                  const hasStem = Boolean(
+                    stem && stem.spectrogram && stem.spectrogram.length > 0,
+                  );
                   const stemDur = stem?.duration || 14;
                   const isTrackActive = activeTrackId === item.id;
                   const isEnabledInMaster = stemMutes[stemKey] !== false;
 
                   return (
-                    <div key={item.id} className="flex flex-col">
+                    <div
+                      key={item.id}
+                      ref={(el) => {
+                        stemCardRefs.current[index] = el;
+                      }}
+                      className="flex flex-col"
+                    >
                       {/* Top Bar above stem: Label + On/Off Switch in Master */}
                       <div className="flex items-center justify-between px-1 mb-0.5 text-xs">
                         <span className="text-slate-300 font-medium">
@@ -507,22 +672,32 @@ export default function Home() {
                         {/* On / Off Switch for inclusion in Master Mix */}
                         <button
                           onClick={() => toggleStemMute(stemKey)}
-                          title={`Turn ${item.label} ${isEnabledInMaster ? 'OFF' : 'ON'} in Master`}
+                          title={`Turn ${item.label} ${isEnabledInMaster ? "OFF" : "ON"} in Master`}
                           className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] transition cursor-pointer font-medium ${
                             isEnabledInMaster
-                              ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/50'
-                              : 'bg-red-950/30 text-slate-500 border border-slate-700 hover:text-slate-300'
+                              ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/50"
+                              : "bg-red-950/30 text-slate-500 border border-slate-700 hover:text-slate-300"
                           }`}
                         >
-                          <span className={`w-1.5 h-1.5 rounded-full ${isEnabledInMaster ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'}`} />
-                          <span>{isEnabledInMaster ? 'in master: ON' : 'in master: OFF'}</span>
+                          <span
+                            className={`w-1.5 h-1.5 rounded-full ${isEnabledInMaster ? "bg-emerald-400 animate-pulse" : "bg-slate-600"}`}
+                          />
+                          <span>
+                            {isEnabledInMaster
+                              ? "in master: ON"
+                              : "in master: OFF"}
+                          </span>
                         </button>
                       </div>
 
                       {/* Stem Box: Spectrogram + Download + Play */}
-                      <div className={`border rounded-xl p-1.5 flex items-center justify-between gap-2 bg-black/50 transition ${
-                        isEnabledInMaster ? 'border-white/40' : 'border-white/15 opacity-60'
-                      }`}>
+                      <div
+                        className={`border rounded-xl p-1.5 flex items-center justify-between gap-2 bg-black/50 transition ${
+                          isEnabledInMaster
+                            ? "border-white/40"
+                            : "border-white/15 opacity-60"
+                        }`}
+                      >
                         {/* Interactive Click-to-Seek Spectrogram */}
                         <div className="flex-1 h-12 rounded overflow-hidden bg-black/40">
                           {hasStem ? (
@@ -533,7 +708,14 @@ export default function Home() {
                               duration={stemDur}
                               currentTime={isTrackActive ? currentTime : 0}
                               isPlaying={isTrackActive && isPlaying}
-                              onSeek={(t) => handlePlayOrSeek(item.id, stem.audioUrl, stemDur, t)}
+                              onSeek={(t) =>
+                                handlePlayOrSeek(
+                                  item.id,
+                                  stem.audioUrl,
+                                  stemDur,
+                                  t,
+                                )
+                              }
                             />
                           ) : (
                             <SpectrogramCanvas
@@ -547,7 +729,6 @@ export default function Home() {
 
                         {/* Action buttons: Download + Play Button */}
                         <div className="flex items-center gap-1.5 shrink-0">
-                          {/* Download Button Next to Play */}
                           {hasStem && (
                             <a
                               href={stem.audioUrl}
@@ -559,20 +740,26 @@ export default function Home() {
                             </a>
                           )}
 
-                          {/* Round Play Button */}
                           <button
                             disabled={!hasStem}
-                            onClick={() => stem && handlePlayOrSeek(item.id, stem.audioUrl, stemDur)}
+                            onClick={() =>
+                              stem &&
+                              handlePlayOrSeek(item.id, stem.audioUrl, stemDur)
+                            }
                             title={`Play ${item.label} solo`}
                             className={`w-8 h-8 rounded-full border flex items-center justify-center text-xs transition cursor-pointer ${
                               hasStem
                                 ? isTrackActive && isPlaying
-                                  ? 'border-white bg-white text-black'
-                                  : 'border-white/50 text-white hover:border-white'
-                                : 'border-white/10 text-white/20 cursor-not-allowed'
+                                  ? "border-white bg-white text-black"
+                                  : "border-white/50 text-white hover:border-white"
+                                : "border-white/10 text-white/20 cursor-not-allowed"
                             }`}
                           >
-                            {isTrackActive && isPlaying ? <FaPause /> : <FaPlay className="ml-0.5" />}
+                            {isTrackActive && isPlaying ? (
+                              <FaPause />
+                            ) : (
+                              <FaPlay className="ml-0.5" />
+                            )}
                           </button>
                         </div>
                       </div>
@@ -581,9 +768,13 @@ export default function Home() {
                 })}
               </div>
 
-              {/* COLUMN 4: CONVERGING MASTER NODE */}
-              <div className="xl:col-span-3 flex flex-col justify-center my-auto pt-2 xl:pt-0">
-                <div className="border border-emerald-500/60 rounded-xl p-3 bg-emerald-950/20 flex flex-col gap-2">
+              {/* COLUMN 4: CONVERGING MASTER NODE + ACOUSTIC READOUT BELOW */}
+              <div className="xl:col-span-3 flex flex-col gap-3 justify-center my-auto pt-2 xl:pt-0">
+                {/* Master Card */}
+                <div
+                  ref={masterCardRef}
+                  className="border border-emerald-500/60 rounded-xl p-3 bg-emerald-950/20 flex flex-col gap-2 relative z-10"
+                >
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-semibold text-emerald-300 uppercase tracking-wider">
                       master
@@ -595,16 +786,25 @@ export default function Home() {
                     )}
                   </div>
 
-                  {/* Master Real STFT Spectrogram (Interactive Click-to-Seek) */}
+                  {/* Master Real STFT Spectrogram */}
                   <div className="h-28 w-full rounded overflow-hidden bg-black/60 border border-white/20">
                     {masterUrl ? (
                       <SpectrogramCanvas
                         matrix={masterSpectrogram}
                         isEmpty={masterSpectrogram.length === 0}
                         duration={masterDuration}
-                        currentTime={activeTrackId === 'master' ? currentTime : 0}
-                        isPlaying={activeTrackId === 'master' && isPlaying}
-                        onSeek={(t) => handlePlayOrSeek('master', masterUrl, masterDuration, t)}
+                        currentTime={
+                          activeTrackId === "master" ? currentTime : 0
+                        }
+                        isPlaying={activeTrackId === "master" && isPlaying}
+                        onSeek={(t) =>
+                          handlePlayOrSeek(
+                            "master",
+                            masterUrl,
+                            masterDuration,
+                            t,
+                          )
+                        }
                       />
                     ) : (
                       <SpectrogramCanvas
@@ -620,16 +820,19 @@ export default function Home() {
                   <div className="flex items-center gap-2">
                     <button
                       disabled={!masterUrl}
-                      onClick={() => masterUrl && handlePlayOrSeek('master', masterUrl, masterDuration)}
+                      onClick={() =>
+                        masterUrl &&
+                        handlePlayOrSeek("master", masterUrl, masterDuration)
+                      }
                       className={`flex-1 py-2.5 rounded-lg border text-xs font-medium flex items-center justify-center gap-2 transition cursor-pointer ${
                         masterUrl
-                          ? activeTrackId === 'master' && isPlaying
-                            ? 'bg-emerald-500 border-emerald-400 text-black font-bold'
-                            : 'border-emerald-400/80 text-emerald-300 hover:bg-emerald-500/10'
-                          : 'border-white/10 text-white/20 cursor-not-allowed'
+                          ? activeTrackId === "master" && isPlaying
+                            ? "bg-emerald-500 border-emerald-400 text-black font-bold"
+                            : "border-emerald-400/80 text-emerald-300 hover:bg-emerald-500/10"
+                          : "border-white/10 text-white/20 cursor-not-allowed"
                       }`}
                     >
-                      {activeTrackId === 'master' && isPlaying ? (
+                      {activeTrackId === "master" && isPlaying ? (
                         <>
                           <FaPause className="text-[11px]" />
                           <span>pause master</span>
@@ -642,7 +845,6 @@ export default function Home() {
                       )}
                     </button>
 
-                    {/* Download Button Next to Master Play Button */}
                     {masterUrl && (
                       <a
                         href={masterUrl}
@@ -655,8 +857,52 @@ export default function Home() {
                     )}
                   </div>
                 </div>
-              </div>
 
+                {/* ACOUSTIC INFO PANEL (Below Master Card) */}
+                {analysis && (
+                  <div className="rounded-xl border border-white/15 bg-black/50 p-2.5 flex flex-col gap-1.5 text-xs">
+                    <div className="text-[10px] uppercase font-mono tracking-wider text-slate-400 border-b border-white/10 pb-1 flex justify-between">
+                      <span>Acoustic Analysis</span>
+                      <span className="text-emerald-400">
+                        {analysis.key ? `Key: ${analysis.key}` : ""}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2 text-slate-300 pt-0.5">
+                      <div className="flex items-center justify-between bg-white/[0.03] px-2 py-1 rounded">
+                        <span className="text-slate-400 text-[11px]">
+                          Tempo
+                        </span>
+                        <span className="font-mono text-white font-medium">
+                          {analysis.bpm || 120} BPM
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between bg-white/[0.03] px-2 py-1 rounded">
+                        <span className="text-slate-400 text-[11px]">Key</span>
+                        <span className="font-mono text-white font-medium">
+                          {analysis.key || "C"}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between bg-white/[0.03] px-2 py-1 rounded">
+                        <span className="text-slate-400 text-[11px]">
+                          Duration
+                        </span>
+                        <span className="font-mono text-white font-medium">
+                          {(masterDuration || inputDur).toFixed(1)}s
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between bg-white/[0.03] px-2 py-1 rounded">
+                        <span className="text-slate-400 text-[11px]">
+                          Onsets
+                        </span>
+                        <span className="font-mono text-white font-medium">
+                          {analysis.onsets_count || 14}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         )}
